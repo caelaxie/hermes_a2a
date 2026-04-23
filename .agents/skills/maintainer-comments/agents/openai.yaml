@@ -1,0 +1,4 @@
+interface:
+  display_name: "Maintainer Comments"
+  short_description: "Add high-signal maintainer comments"
+  default_prompt: "Use $maintainer-comments to annotate non-obvious code paths for new maintainers while preserving behavior."
