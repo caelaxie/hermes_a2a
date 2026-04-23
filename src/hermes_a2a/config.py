@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -37,6 +38,9 @@ class A2APluginConfig:
     remote_agents: list[RemoteAgentPreset] = field(default_factory=list)
     default_timeout_seconds: float = 10.0
     allow_runtime_write: bool = True
+    execution_adapter: str = "hermes"
+    hermes_command: str = "hermes"
+    hermes_extra_args: list[str] = field(default_factory=list)
 
     @property
     def resolved_public_base_url(self) -> str:
@@ -80,6 +84,9 @@ class A2APluginConfig:
                     }
                     for agent in self.remote_agents
                 ],
+                "execution_adapter": self.execution_adapter,
+                "hermes_command": self.hermes_command,
+                "hermes_extra_args": list(self.hermes_extra_args),
             },
         }
 
@@ -137,6 +144,9 @@ def load_config() -> A2APluginConfig:
     port = int(os.getenv("A2A_PORT", "8000").strip() or "8000")
     remote_agents = _parse_remote_agents(os.getenv("A2A_REMOTE_AGENTS_JSON", "").strip())
     exported_skills = _parse_exported_skills(os.getenv("A2A_EXPORTED_SKILLS", "").strip())
+    execution_adapter = os.getenv("A2A_EXECUTION_ADAPTER", "hermes").strip().lower() or "hermes"
+    hermes_command = os.getenv("A2A_HERMES_COMMAND", "hermes").strip() or "hermes"
+    hermes_extra_args = shlex.split(os.getenv("A2A_HERMES_EXTRA_ARGS", "").strip())
     return A2APluginConfig(
         host=host,
         port=port,
@@ -149,4 +159,7 @@ def load_config() -> A2APluginConfig:
             os.getenv("A2A_DEFAULT_TIMEOUT_SECONDS", "10").strip() or "10"
         ),
         allow_runtime_write=_truthy(os.getenv("A2A_ALLOW_RUNTIME_WRITE", "true")),
+        execution_adapter=execution_adapter,
+        hermes_command=hermes_command,
+        hermes_extra_args=hermes_extra_args,
     )

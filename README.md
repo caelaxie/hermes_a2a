@@ -112,6 +112,9 @@ The plugin is configured through environment variables:
 - `A2A_BEARER_TOKEN`
 - `A2A_EXPORTED_SKILLS`
 - `A2A_REMOTE_AGENTS_JSON`
+- `A2A_EXECUTION_ADAPTER` (`hermes` by default, set to `demo` for deterministic protocol testing)
+- `A2A_HERMES_COMMAND` (`hermes` by default)
+- `A2A_HERMES_EXTRA_ARGS` (optional shell-style arguments appended to `hermes chat`)
 
 `A2A_REMOTE_AGENTS_JSON` should decode to an object or list. Example:
 
@@ -129,5 +132,6 @@ The plugin is configured through environment variables:
 
 ## Notes
 
-- The current execution adapter is a demo adapter. The protocol, storage, and CLI surfaces are real, but the adapter is the seam where actual Hermes runtime integration should be added.
+- By default the inbound server routes A2A `message/send` and `message/stream` calls through `hermes chat -q ... --quiet`. Set `A2A_EXECUTION_ADAPTER=demo` to use the deterministic demo adapter for protocol testing without invoking a model.
+- The Hermes subprocess adapter is synchronous: streaming endpoints emit A2A SSE events after the underlying Hermes CLI call returns.
 - The SQLite store is durable by default and keeps task snapshots, event history, remote delegation tracking, and inbound push notification config state.

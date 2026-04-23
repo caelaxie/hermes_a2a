@@ -12,7 +12,11 @@ from typing import Iterable
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
-from .adapter import DemoHermesExecutionAdapter, HermesExecutionAdapter
+from .adapter import (
+    DemoHermesExecutionAdapter,
+    HermesExecutionAdapter,
+    HermesSubprocessExecutionAdapter,
+)
 from .config import A2APluginConfig, load_config
 from .mapping import (
     apply_hermes_event,
@@ -28,6 +32,21 @@ def _jsonrpc_error(request_id, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
+def _build_execution_adapter(config: A2APluginConfig) -> HermesExecutionAdapter:
+    if config.execution_adapter == "hermes":
+        return HermesSubprocessExecutionAdapter(
+            command=config.hermes_command,
+            timeout_seconds=config.default_timeout_seconds,
+            extra_args=config.hermes_extra_args,
+        )
+    if config.execution_adapter == "demo":
+        return DemoHermesExecutionAdapter()
+    raise ValueError(
+        "Unsupported A2A_EXECUTION_ADAPTER "
+        f"{config.execution_adapter!r}; expected 'hermes' or 'demo'"
+    )
+
+
 class A2AService:
     """Application service shared by Hermes tools, CLI, and HTTP handlers."""
 
@@ -39,7 +58,7 @@ class A2AService:
     ) -> None:
         self.config = config or load_config()
         self.store = store or SQLiteTaskStore(self.config.resolved_store_path)
-        self.adapter = adapter or DemoHermesExecutionAdapter()
+        self.adapter = adapter or _build_execution_adapter(self.config)
 
     def status_payload(self) -> dict:
         payload = self.config.status_dict()
