@@ -28,6 +28,7 @@ class ServerTests(unittest.TestCase):
             port=0,
             store_path=str(Path(self.tmpdir.name) / "server.db"),
             exported_skills=["delegate"],
+            execution_adapter="demo",
         )
         self.server = create_server(config=config)
         self.server.start()
