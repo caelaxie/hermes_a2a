@@ -1,0 +1,5 @@
+name: a2a
+version: 0.1.0
+description: Deployable Hermes plugin scaffold for A2A integrations
+provides_tools:
+  - a2a_status
