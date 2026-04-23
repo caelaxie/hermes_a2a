@@ -1,5 +1,9 @@
 name: a2a
 version: 0.1.0
-description: Deployable Hermes plugin scaffold for A2A integrations
+description: Bidirectional Hermes A2A bridge with inbound server and outbound delegation tools
 provides_tools:
   - a2a_status
+  - a2a_list_agents
+  - a2a_get_task
+  - a2a_cancel_task
+  - a2a_delegate

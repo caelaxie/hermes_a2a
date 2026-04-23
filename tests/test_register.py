@@ -41,9 +41,18 @@ class RegisterTests(unittest.TestCase):
 
         plugin.register(ctx)
 
-        self.assertEqual(len(ctx.tools), 1)
-        self.assertEqual(ctx.tools[0]["name"], "a2a_status")
-        self.assertEqual(ctx.tools[0]["toolset"], "a2a")
+        self.assertEqual(len(ctx.tools), 5)
+        self.assertEqual({tool["toolset"] for tool in ctx.tools}, {"a2a"})
+        self.assertEqual(
+            {tool["name"] for tool in ctx.tools},
+            {
+                "a2a_status",
+                "a2a_list_agents",
+                "a2a_get_task",
+                "a2a_cancel_task",
+                "a2a_delegate",
+            },
+        )
 
         self.assertEqual(len(ctx.cli_commands), 1)
         self.assertEqual(ctx.cli_commands[0]["name"], "a2a")
