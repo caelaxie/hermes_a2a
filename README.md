@@ -59,12 +59,26 @@ mkdir -p ~/.hermes/plugins
 git clone <repo-url> ~/.hermes/plugins/a2a
 ```
 
-Then restart Hermes and verify:
+Then restart Hermes and verify the plugin is visible:
 
 ```bash
 hermes plugins list
+```
+
+If your Hermes version supports top-level CLI commands from standalone plugins,
+you can use:
+
+```bash
 hermes a2a status
 hermes a2a card
+```
+
+For Hermes versions that do not yet discover standalone plugin CLI commands, use
+the plugin-owned console script instead:
+
+```bash
+uv run hermes-a2a status
+uv run hermes-a2a card
 ```
 
 ## Runtime surfaces
