@@ -1,7 +1,14 @@
-"""CLI entrypoints for `hermes a2a ...`."""
+"""CLI entrypoints for Hermes A2A commands.
+
+Hermes core can call ``setup_argparse()`` for ``hermes a2a ...`` when its
+plugin CLI discovery supports standalone plugins. The package also exposes a
+standalone ``hermes-a2a`` console script so the plugin remains usable with
+Hermes versions that do not yet discover general plugin CLI commands.
+"""
 
 from __future__ import annotations
 
+import argparse
 import json
 from argparse import Namespace
 
@@ -104,3 +111,29 @@ def setup_argparse(subparser) -> None:
     task_cancel.add_argument("task_id")
 
     subparser.set_defaults(func=handle_cli)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the standalone ``hermes-a2a`` argument parser."""
+    parser = argparse.ArgumentParser(
+        prog="hermes-a2a",
+        description="Operate the Hermes A2A bridge",
+    )
+    setup_argparse(parser)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Standalone console-script entrypoint for the A2A plugin."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    handler = getattr(args, "func", None)
+    if handler is None:
+        parser.print_help()
+        return 2
+    handler(args)
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through console script
+    raise SystemExit(main())

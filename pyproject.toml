@@ -17,6 +17,9 @@ sdk = ["a2a-sdk[http-server,sqlite]>=0.3.0"]
 [project.entry-points."hermes_agent.plugins"]
 a2a = "hermes_a2a"
 
+[project.scripts]
+hermes-a2a = "hermes_a2a.cli:main"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 
