@@ -42,13 +42,14 @@ The repo root stays Hermes-compatible, but all real implementation lives in `src
 ## Local development
 
 ```bash
-python3 -m unittest discover -s tests -v
+uv sync
+uv run python -m unittest discover -s tests -v
 ```
 
 Optional SDK install if you want to swap in the upstream Python A2A stack later:
 
 ```bash
-python3 -m pip install -e ".[sdk]"
+uv sync --extra sdk
 ```
 
 ## Deployment
