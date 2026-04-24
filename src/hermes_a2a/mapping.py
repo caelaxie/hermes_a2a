@@ -212,11 +212,11 @@ def build_agent_card(config: A2APluginConfig) -> dict:
     card = {
         "name": "Hermes A2A Plugin",
         "description": "Hermes exposed as a bidirectional A2A bridge.",
-        "protocolVersions": [PROTOCOL_VERSION],
         "supportedInterfaces": [
             {
                 "url": config.rpc_url,
                 "protocolBinding": "JSONRPC",
+                "protocolVersion": PROTOCOL_VERSION,
             }
         ],
         "provider": {
@@ -241,7 +241,7 @@ def build_agent_card(config: A2APluginConfig) -> dict:
                 }
             }
         }
-        card["security"] = [{"schemes": {"bearerAuth": {"list": []}}}]
+        card["security"] = [{"bearerAuth": []}]
     return card
 
 

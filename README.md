@@ -85,6 +85,10 @@ uv run hermes-a2a card
 
 - Inbound server:
   - `GET /.well-known/agent-card.json`
+    publishes an A2A 1.0 AgentCard with the JSON-RPC endpoint in
+    `supportedInterfaces`; when `A2A_BEARER_TOKEN` is configured, the card
+    advertises the required bearer auth scheme while remaining publicly
+    discoverable.
   - `POST /rpc` for the official A2A 1.0 JSON-RPC methods:
     `SendMessage`, `SendStreamingMessage`, `GetTask`, `ListTasks`,
     `CancelTask`, `SubscribeToTask`, `CreateTaskPushNotificationConfig`,
