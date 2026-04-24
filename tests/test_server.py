@@ -314,6 +314,15 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("protocolVersion", card)
         self.assertNotIn("preferredTransport", card)
         self.assertTrue(card["capabilities"]["streaming"])
+        streaming_extensions = card["capabilities"].get("extensions", [])
+        self.assertEqual(len(streaming_extensions), 1)
+        self.assertEqual(
+            streaming_extensions[0]["uri"],
+            "https://github.com/caelaxie/hermes_a2a/extensions/runtime-streaming",
+        )
+        self.assertFalse(streaming_extensions[0]["required"])
+        self.assertIn("task-level progress", streaming_extensions[0]["description"])
+        self.assertIn("not token-", streaming_extensions[0]["description"])
         self.assertEqual(card["skills"][0]["inputModes"], ["text/plain", "application/json"])
         self.assertEqual(cache_control, "public, max-age=300")
         self.assertTrue(etag)

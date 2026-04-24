@@ -15,6 +15,10 @@ from .protocol import (
     normalize_task_state,
 )
 
+HERMES_RUNTIME_STREAMING_EXTENSION_URI = (
+    "https://github.com/caelaxie/hermes_a2a/extensions/runtime-streaming"
+)
+
 
 def utc_timestamp() -> str:
     """Return an RFC3339 timestamp in UTC."""
@@ -234,6 +238,18 @@ def build_agent_card(config: A2APluginConfig) -> dict:
         "capabilities": {
             "streaming": True,
             "pushNotifications": True,
+            "extensions": [
+                {
+                    "uri": HERMES_RUNTIME_STREAMING_EXTENSION_URI,
+                    "description": (
+                        "SendStreamingMessage streams A2A task status and artifact "
+                        "events. The Hermes subprocess adapter emits task-level "
+                        "progress and the final CLI output, not token- or "
+                        "tool-level Hermes runtime chunks."
+                    ),
+                    "required": False,
+                }
+            ],
         },
         "skills": skills,
     }
