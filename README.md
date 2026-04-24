@@ -73,24 +73,39 @@ uv run hermes-a2a status
 uv run hermes-a2a card
 ```
 
-Some Hermes versions may also expose standalone plugin CLI commands at the
-top level after the plugin is enabled:
+Top-level plugin CLI discovery is not available in any released Hermes tag as
+of 2026-04-24. The first known Hermes core support is the unreleased upstream
+PR [NousResearch/hermes-agent#13643](https://github.com/NousResearch/hermes-agent/pull/13643)
+at commit `308bbf6a5480223ec484b342422fe883e8ac81e4`; the latest release
+checked for this note, `v2026.4.23`, does not include it.
+
+After installing a Hermes build that contains that commit, the same commands
+should be available at the top level:
 
 ```bash
 hermes a2a status
 hermes a2a card
 ```
 
-Treat `hermes-a2a` as the reliable command until Hermes core exposes
-standalone plugin CLI discovery in your installation.
+Treat `hermes-a2a` as the reliable fallback on older or released Hermes
+installs.
 
 This plugin registers the `a2a` command through both `ctx.register_cli_command`
-and a repo-root `cli.py` compatibility shim. Current Hermes core integration is
-tracked upstream in [NousResearch/hermes-agent#13643](https://github.com/NousResearch/hermes-agent/pull/13643).
-After installing a Hermes build with that support, verify the top-level path:
+and a repo-root `cli.py` compatibility shim. To verify top-level registration
+in an environment with the required Hermes core support, run:
 
 ```bash
 hermes a2a status
+```
+
+The JSON status payload also reports the current compatibility state under
+`hermes_cli.top_level_cli_discovery`.
+
+The unittest suite includes the same integration check as an opt-in test for
+machines that have a supported Hermes build installed:
+
+```bash
+HERMES_A2A_VERIFY_TOP_LEVEL_CLI=1 uv run python -m unittest tests.test_cli_entrypoint.CliEntrypointTests.test_installed_hermes_exposes_top_level_cli_when_supported -v
 ```
 
 ## Runtime surfaces
@@ -121,10 +136,12 @@ hermes a2a status
   - `hermes-a2a task get <id>`
   - `hermes-a2a task cancel <id>`
 
-  Hermes versions with standalone plugin CLI discovery may additionally support
-  the same commands under `hermes a2a ...`; see
+  Hermes builds containing upstream PR
   [NousResearch/hermes-agent#13643](https://github.com/NousResearch/hermes-agent/pull/13643)
-  for the upstream CLI wiring.
+  at commit `308bbf6a5480223ec484b342422fe883e8ac81e4` may additionally
+  support the same commands under `hermes a2a ...`. No released Hermes tag
+  includes that support as of 2026-04-24, so keep `hermes-a2a` documented for
+  older installs.
 
 ## Config
 
