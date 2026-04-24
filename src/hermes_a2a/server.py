@@ -109,9 +109,9 @@ class A2AService:
             "local_tasks": len(self.store.list_tasks()),
         }
         payload["message"] = (
-            "Hermes A2A bridge is configured. Start `hermes-a2a serve` "
-            "(or `hermes a2a serve` on Hermes versions with standalone plugin "
-            "CLI discovery) to expose the inbound JSON-RPC + SSE surface."
+            "Hermes A2A bridge is configured. Start the inbound JSON-RPC + SSE "
+            "surface with `hermes-a2a serve`. `hermes a2a serve` only works on "
+            "Hermes versions that expose standalone plugin CLI commands."
         )
         return payload
 

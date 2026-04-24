@@ -1,9 +1,8 @@
 """CLI entrypoints for Hermes A2A commands.
 
-Hermes core can call ``setup_argparse()`` for ``hermes a2a ...`` when its
-plugin CLI discovery supports standalone plugins. The package also exposes a
-standalone ``hermes-a2a`` console script so the plugin remains usable with
-Hermes versions that do not yet discover general plugin CLI commands.
+The package exposes ``hermes-a2a`` as its reliable console script. Hermes core
+can also call ``setup_argparse()`` for ``hermes a2a ...`` when its plugin CLI
+discovery supports standalone plugin commands.
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ from .tools import (
 
 
 def handle_cli(args: Namespace) -> None:
-    """Dispatch `hermes a2a ...` commands."""
+    """Dispatch A2A CLI commands."""
     command = getattr(args, "a2a_command", None)
     if command == "status":
         print(json.dumps(get_status_payload(), indent=2, sort_keys=True))
@@ -86,7 +85,7 @@ def handle_cli(args: Namespace) -> None:
         )
         return
 
-    print("Usage: hermes a2a {status|card|serve|agents list|task get|task cancel}")
+    print("Usage: hermes-a2a {status|card|serve|agents list|task get|task cancel}")
 
 
 def setup_argparse(subparser) -> None:
