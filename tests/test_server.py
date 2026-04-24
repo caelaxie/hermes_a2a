@@ -39,6 +39,8 @@ class BlockingStreamAdapter(HermesExecutionAdapter):
     def __init__(self) -> None:
         self.first_event_yielded = threading.Event()
         self.release = threading.Event()
+        self.canceled = threading.Event()
+        self.cancel_calls: list[tuple[str, str]] = []
 
     def _events(self, task_id: str, context_id: str) -> list[HermesEvent]:
         return [
@@ -94,7 +96,11 @@ class BlockingStreamAdapter(HermesExecutionAdapter):
         events = self._events(task_id, context_id)
         self.first_event_yielded.set()
         yield events[0]
-        self.release.wait(timeout=5)
+        while not self.release.wait(timeout=0.05):
+            if self.canceled.is_set():
+                return
+        if self.canceled.is_set():
+            return
         yield from events[1:]
 
     def cancel(
@@ -104,6 +110,8 @@ class BlockingStreamAdapter(HermesExecutionAdapter):
         metadata: dict | None = None,
     ):
         del metadata
+        self.cancel_calls.append((task_id, context_id))
+        self.canceled.set()
         return [
             HermesEvent(
                 kind="status",
@@ -527,6 +535,71 @@ class ServerTests(unittest.TestCase):
                 adapter.release.set()
                 client.join(timeout=2)
                 server.stop()
+
+    def test_cancel_task_finds_active_streaming_task_before_finalization(self) -> None:
+        adapter = BlockingStreamAdapter()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = A2APluginConfig(
+                host="127.0.0.1",
+                port=0,
+                store_path=str(Path(tmpdir) / "cancel-stream.db"),
+                execution_adapter="demo",
+            )
+            server = create_server(config=config, adapter=adapter)
+            server.start()
+            first_payload: dict[str, dict] = {}
+            first_line_read = threading.Event()
+            client_error: list[BaseException] = []
+
+            def read_stream() -> None:
+                try:
+                    with self._rpc_to_server(
+                        server.base_url,
+                        "SendStreamingMessage",
+                        {"message": self._message("cancel me while streaming")},
+                        accept="text/event-stream",
+                    ) as response:
+                        line = response.readline().decode("utf-8")
+                        first_payload["event"] = json.loads(line.split(":", 1)[1].strip())
+                        first_line_read.set()
+                        response.read()
+                except BaseException as exc:  # pragma: no cover - failure diagnostics
+                    client_error.append(exc)
+
+            client = threading.Thread(target=read_stream)
+            client.start()
+            try:
+                self.assertTrue(adapter.first_event_yielded.wait(timeout=2))
+                self.assertTrue(first_line_read.wait(timeout=2))
+                task_id = first_payload["event"]["result"]["statusUpdate"]["taskId"]
+
+                with self._rpc_to_server(
+                    server.base_url,
+                    "CancelTask",
+                    {"id": task_id},
+                ) as response:
+                    cancel_payload = json.loads(response.read().decode("utf-8"))
+
+                self.assertNotIn("error", cancel_payload)
+                self.assertEqual(
+                    cancel_payload["result"]["status"]["state"],
+                    "TASK_STATE_CANCELED",
+                )
+                self.assertEqual(adapter.cancel_calls, [(task_id, task_id)])
+                client.join(timeout=2)
+                self.assertFalse(client.is_alive())
+                with self._rpc_to_server(server.base_url, "GetTask", {"id": task_id}) as response:
+                    stored_payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(
+                    stored_payload["result"]["status"]["state"],
+                    "TASK_STATE_CANCELED",
+                )
+            finally:
+                adapter.release.set()
+                client.join(timeout=2)
+                server.stop()
+
+            self.assertFalse(client_error)
 
     def test_send_message_configuration_registers_push_config(self) -> None:
         callback, callback_url, callback_server, callback_thread = self._start_callback_server()
