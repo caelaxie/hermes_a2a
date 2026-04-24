@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import signal
 import subprocess
 import threading
@@ -116,8 +117,51 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
     def _clean_stdout(self, stdout: str) -> str:
         # Hermes CLI sessions may print bookkeeping lines that are useful for
         # local shells but should not become user-visible A2A artifacts.
-        lines = [line for line in stdout.splitlines() if not line.startswith("session_id:")]
+        lines = [
+            line
+            for line in stdout.splitlines()
+            if not line.startswith(("session_id:", "Session:"))
+        ]
         return self._truncate("\n".join(lines).strip())
+
+    def _new_stdout_filter_state(self) -> dict[str, str | bool]:
+        return {"pending": "", "suppressing": False}
+
+    def _filter_stream_stdout_chunk(
+        self,
+        chunk: str,
+        state: dict[str, str | bool],
+    ) -> str:
+        prefixes = ("session_id:", "Session:")
+        visible: list[str] = []
+        for character in chunk:
+            if state["suppressing"]:
+                if character == "\n":
+                    state["suppressing"] = False
+                    state["pending"] = ""
+                continue
+
+            pending = str(state["pending"]) + character
+            if any(prefix.startswith(pending) for prefix in prefixes):
+                state["pending"] = pending
+                continue
+            if any(pending.startswith(prefix) for prefix in prefixes):
+                state["suppressing"] = True
+                state["pending"] = ""
+                if character == "\n":
+                    state["suppressing"] = False
+                continue
+
+            visible.append(pending)
+            state["pending"] = ""
+        return "".join(visible)
+
+    def _finish_stream_stdout_filter(self, state: dict[str, str | bool]) -> str:
+        if state["suppressing"]:
+            return ""
+        pending = str(state["pending"])
+        state["pending"] = ""
+        return pending
 
     def _extract_session_id(self, stdout: str) -> str:
         for line in stdout.splitlines():
@@ -240,6 +284,220 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
                 stderr,
             )
 
+    def _enqueue_pipe_output(
+        self,
+        pipe,
+        source: str,
+        output_queue: queue.Queue[tuple[str, str | None]],
+    ) -> None:
+        try:
+            while True:
+                chunk = pipe.read(1)
+                if chunk == "":
+                    break
+                output_queue.put((source, chunk))
+        finally:
+            try:
+                pipe.close()
+            except OSError:
+                pass
+            output_queue.put((source, None))
+
+    def _stream_artifact_event(
+        self,
+        task_id: str,
+        context_id: str,
+        text: str,
+        append: bool,
+        last_chunk: bool,
+    ) -> HermesEvent:
+        return HermesEvent(
+            kind="artifact",
+            state="working",
+            message="Hermes runtime response chunk emitted",
+            text=text,
+            metadata={
+                "task_id": task_id,
+                "context_id": context_id,
+                "artifact_id": "hermes-response",
+                "append": "true" if append else "false",
+                "last_chunk": "true" if last_chunk else "false",
+            },
+        )
+
+    def _stream_with_process_tracking(
+        self,
+        task_id: str,
+        context_id: str,
+        command: list[str],
+    ):
+        popen_kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "bufsize": 1,
+        }
+        if os.name != "nt":
+            popen_kwargs["start_new_session"] = True
+        process = subprocess.Popen(command, **popen_kwargs)
+        if not self._register_process(task_id, process):
+            self._stop_process(process)
+            return None, False
+
+        output_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+        stdout_thread = threading.Thread(
+            target=self._enqueue_pipe_output,
+            args=(process.stdout, "stdout", output_queue),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=self._enqueue_pipe_output,
+            args=(process.stderr, "stderr", output_queue),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        deadline = time.monotonic() + self.timeout_seconds
+        raw_stdout: list[str] = []
+        raw_stderr: list[str] = []
+        closed_sources: set[str] = set()
+        filter_state = self._new_stdout_filter_state()
+        streamed_stdout = False
+
+        while True:
+            if self._is_cancel_requested(task_id):
+                self._stop_process(process)
+                return None, streamed_stdout
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._stop_process(process)
+                raise subprocess.TimeoutExpired(command, self.timeout_seconds)
+
+            process_done = process.poll() is not None
+            items: list[tuple[str, str | None]] = []
+            try:
+                items.append(
+                    output_queue.get(
+                        timeout=0.01 if process_done else min(0.05, remaining)
+                    )
+                )
+            except queue.Empty:
+                pass
+            while True:
+                try:
+                    items.append(output_queue.get(timeout=0.01))
+                except queue.Empty:
+                    break
+
+            visible_stdout: list[str] = []
+            for source, chunk in items:
+                if chunk is None:
+                    closed_sources.add(source)
+                    continue
+                if source == "stdout":
+                    raw_stdout.append(chunk)
+                    visible_chunk = self._filter_stream_stdout_chunk(
+                        chunk,
+                        filter_state,
+                    )
+                    if visible_chunk:
+                        visible_stdout.append(visible_chunk)
+                    continue
+                raw_stderr.append(chunk)
+
+            finished_after_items = (
+                process_done
+                and {"stdout", "stderr"}.issubset(closed_sources)
+                and output_queue.empty()
+            )
+            if visible_stdout:
+                text = self._truncate("".join(visible_stdout))
+                yield self._stream_artifact_event(
+                    task_id,
+                    context_id,
+                    text,
+                    append=streamed_stdout,
+                    last_chunk=finished_after_items,
+                )
+                streamed_stdout = True
+
+            if finished_after_items:
+                break
+
+        pending_stdout = self._finish_stream_stdout_filter(filter_state)
+        if pending_stdout:
+            yield self._stream_artifact_event(
+                task_id,
+                context_id,
+                self._truncate(pending_stdout),
+                append=streamed_stdout,
+                last_chunk=True,
+            )
+            streamed_stdout = True
+        stdout_thread.join(timeout=0.1)
+        stderr_thread.join(timeout=0.1)
+        if self._is_cancel_requested(task_id):
+            return None, streamed_stdout
+        return (
+            subprocess.CompletedProcess(
+                command,
+                process.returncode,
+                "".join(raw_stdout),
+                "".join(raw_stderr),
+            ),
+            streamed_stdout,
+        )
+
+    def _completion_events(
+        self,
+        task_id: str,
+        context_id: str,
+        completed: subprocess.CompletedProcess,
+        emitted_stdout: bool,
+    ) -> Iterable[HermesEvent]:
+        raw_stdout = completed.stdout or ""
+        hermes_session_id = self._extract_session_id(raw_stdout)
+        stdout = self._clean_stdout(raw_stdout)
+        if completed.returncode != 0:
+            yield HermesEvent(
+                kind="status",
+                state="failed",
+                message="Hermes runtime failed",
+                metadata={
+                    "task_id": task_id,
+                    "context_id": context_id,
+                    "exit_code": str(completed.returncode),
+                },
+            )
+            return
+
+        if stdout and not emitted_stdout:
+            yield HermesEvent(
+                kind="artifact",
+                state="working",
+                message="Hermes runtime response emitted",
+                text=stdout,
+                metadata={"artifact_id": "hermes-response"},
+            )
+        if self._is_cancel_requested(task_id):
+            return
+        yield HermesEvent(
+            kind="status",
+            state="completed",
+            message="Hermes runtime execution completed",
+            metadata={
+                "task_id": task_id,
+                "context_id": context_id,
+                **(
+                    {"hermes_session_id": hermes_session_id}
+                    if hermes_session_id
+                    else {}
+                ),
+            },
+        )
+
     def _run(
         self,
         task_id: str,
@@ -275,45 +533,76 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
             if self._is_cancel_requested(task_id):
                 return
 
-            raw_stdout = completed.stdout or ""
-            hermes_session_id = self._extract_session_id(raw_stdout)
-            stdout = self._clean_stdout(raw_stdout)
-            if completed.returncode != 0:
-                yield HermesEvent(
-                    kind="status",
-                    state="failed",
-                    message="Hermes runtime failed",
-                    metadata={
-                        "task_id": task_id,
-                        "context_id": context_id,
-                        "exit_code": str(completed.returncode),
-                    },
-                )
-                return
-
-            if stdout:
-                yield HermesEvent(
-                    kind="artifact",
-                    state="working",
-                    message="Hermes runtime response emitted",
-                    text=stdout,
-                    metadata={"artifact_id": "hermes-response"},
-                )
-            if self._is_cancel_requested(task_id):
-                return
+            yield from self._completion_events(
+                task_id,
+                context_id,
+                completed,
+                emitted_stdout=False,
+            )
+        except subprocess.TimeoutExpired:
             yield HermesEvent(
                 kind="status",
-                state="completed",
-                message="Hermes runtime execution completed",
-                metadata={
-                    "task_id": task_id,
-                    "context_id": context_id,
-                    **(
-                        {"hermes_session_id": hermes_session_id}
-                        if hermes_session_id
-                        else {}
-                    ),
-                },
+                state="failed",
+                message=f"Hermes runtime timed out after {self.timeout_seconds:g}s",
+                metadata={"task_id": task_id, "context_id": context_id},
+            )
+            return
+        except OSError:
+            yield HermesEvent(
+                kind="status",
+                state="failed",
+                message="Hermes runtime command failed to start",
+                metadata={"task_id": task_id, "context_id": context_id},
+            )
+            return
+        finally:
+            self._clear_process_slot(task_id)
+
+    def _run_streaming(
+        self,
+        task_id: str,
+        context_id: str,
+        message: str,
+        resume_session_id: str = "",
+    ) -> Iterable[HermesEvent]:
+        command = [self.command, "chat", "--quiet", *self.extra_args]
+        if resume_session_id:
+            command.extend(["--resume", resume_session_id])
+        command.extend(["-q", message])
+        self._reserve_process_slot(task_id)
+        try:
+            yield HermesEvent(
+                kind="status",
+                state="working",
+                message="Hermes runtime execution started",
+                metadata={"task_id": task_id, "context_id": context_id},
+            )
+            if self._is_cancel_requested(task_id):
+                return
+            if self.runner is not None:
+                completed = self.runner(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_seconds,
+                )
+                emitted_stdout = False
+            else:
+                completed, emitted_stdout = yield from self._stream_with_process_tracking(
+                    task_id,
+                    context_id,
+                    command,
+                )
+                if completed is None:
+                    return
+            if self._is_cancel_requested(task_id):
+                return
+
+            yield from self._completion_events(
+                task_id,
+                context_id,
+                completed,
+                emitted_stdout=emitted_stdout,
             )
         except subprocess.TimeoutExpired:
             yield HermesEvent(
@@ -369,7 +658,7 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
         message: str,
         metadata: dict | None = None,
     ) -> Iterable[HermesEvent]:
-        return self._run(
+        return self._run_streaming(
             task_id,
             context_id,
             message,

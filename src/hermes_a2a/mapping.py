@@ -20,6 +20,13 @@ HERMES_RUNTIME_STREAMING_EXTENSION_URI = (
 )
 
 
+def _metadata_bool(metadata: dict, key: str, default: bool) -> bool:
+    value = metadata.get(key)
+    if value is None:
+        return default
+    return str(value).lower() in {"1", "true", "yes", "on"}
+
+
 def utc_timestamp() -> str:
     """Return an RFC3339 timestamp in UTC."""
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -190,14 +197,31 @@ def apply_hermes_event(task: dict, event: HermesEvent) -> dict:
 
     artifact = build_artifact_from_event(event)
     if artifact is not None:
-        task.setdefault("artifacts", []).append(artifact)
+        append = _metadata_bool(event.metadata, "append", False)
+        last_chunk = _metadata_bool(event.metadata, "last_chunk", True)
+        if append:
+            artifacts = task.setdefault("artifacts", [])
+            existing = next(
+                (
+                    candidate
+                    for candidate in reversed(artifacts)
+                    if candidate.get("artifactId") == artifact.get("artifactId")
+                ),
+                None,
+            )
+            if existing is not None:
+                existing.setdefault("parts", []).extend(artifact.get("parts", []))
+            else:
+                artifacts.append(artifact)
+        else:
+            task.setdefault("artifacts", []).append(artifact)
         return {
             "artifactUpdate": {
                 "taskId": task["id"],
                 "contextId": task["contextId"],
                 "artifact": artifact,
-                "append": False,
-                "lastChunk": True,
+                "append": append,
+                "lastChunk": last_chunk,
             },
         }
 
@@ -242,10 +266,11 @@ def build_agent_card(config: A2APluginConfig) -> dict:
                 {
                     "uri": HERMES_RUNTIME_STREAMING_EXTENSION_URI,
                     "description": (
-                        "SendStreamingMessage streams A2A task status and artifact "
-                        "events. The Hermes subprocess adapter emits task-level "
-                        "progress and the final CLI output, not token- or "
-                        "tool-level Hermes runtime chunks."
+                        "SendStreamingMessage streams A2A task status, artifact "
+                        "events, and incremental Hermes subprocess stdout chunks "
+                        "when the runtime flushes output before exit. It falls "
+                        "back to final CLI output when fine-grained runtime "
+                        "output is unavailable."
                     ),
                     "required": False,
                 }
