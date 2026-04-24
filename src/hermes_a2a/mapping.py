@@ -15,7 +15,13 @@ def utc_timestamp() -> str:
 
 
 def extract_text_from_message(message: dict | str | None) -> str:
-    """Extract a user-facing text payload from a loose A2A message shape."""
+    """Extract text from the A2A message variants this bridge accepts.
+
+    The official path is text parts, but this helper also accepts a few loose
+    shapes so tool callers and older tests can share the same adapter boundary.
+    Keep any compatibility expansion here instead of spreading message parsing
+    through the service or adapter layers.
+    """
     if message is None:
         return ""
     if isinstance(message, str):
@@ -64,6 +70,7 @@ def build_file_part(uri: str) -> dict:
 
 
 def build_artifact_from_event(event: HermesEvent) -> dict | None:
+    """Turn one Hermes artifact event into the narrow A2A artifact shape."""
     artifact_id = event.metadata.get("artifact_id", "artifact")
     if event.text:
         parts = [build_text_part(event.text)]
@@ -87,6 +94,7 @@ def build_initial_task(
     direction: str,
     metadata: dict | None = None,
 ) -> dict:
+    """Create the task snapshot before any runtime event has been applied."""
     timestamp = utc_timestamp()
     return {
         "kind": "task",
@@ -118,12 +126,19 @@ def build_initial_task(
 
 
 def apply_hermes_event(task: dict, event: HermesEvent) -> dict:
-    """Apply one adapter event to a task snapshot and return an event envelope."""
+    """Apply one adapter event to a task snapshot and return an SSE envelope.
+
+    This is the main protocol translation point: adapters emit Hermes-native
+    status/artifact events, while server, client, and store code deal in A2A
+    task snapshots and event names.
+    """
     timestamp = utc_timestamp()
     task["updatedAt"] = timestamp
     task["historyLength"] = int(task.get("historyLength", 0)) + 1
 
     if event.kind in {"status", "requires_input"}:
+        # Status events mutate the task's terminal state and are also appended
+        # to message history so resumed clients can reconstruct the exchange.
         task["status"] = {
             "state": event.state,
             "timestamp": timestamp,
@@ -169,7 +184,7 @@ def apply_hermes_event(task: dict, event: HermesEvent) -> dict:
 
 
 def build_agent_card(config: A2APluginConfig) -> dict:
-    """Build the public agent card published by the plugin."""
+    """Build the public discovery card for this Hermes bridge."""
     skills = [
         {
             "id": skill,
@@ -202,7 +217,7 @@ def build_agent_card(config: A2APluginConfig) -> dict:
 
 
 def make_sse_payload(event_name: str, data: dict) -> bytes:
-    """Encode an SSE event payload."""
+    """Encode one A2A task update as a Server-Sent Event frame."""
     import json
 
     return (

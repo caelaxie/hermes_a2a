@@ -11,7 +11,13 @@ from .mapping import utc_timestamp
 
 
 class SQLiteTaskStore:
-    """Persist task snapshots, event journals, and push configs."""
+    """Persist protocol-facing state outside the transport layer.
+
+    Task snapshots are optimized for current `tasks/get` responses. The event
+    journal is kept separately so SSE resubscribe can replay updates, and remote
+    delegation mappings stay outside snapshots so local task IDs can remain the
+    lookup key for Hermes tools.
+    """
 
     def __init__(self, path: str) -> None:
         self.path = str(Path(path).expanduser())
