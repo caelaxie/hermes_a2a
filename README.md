@@ -14,6 +14,7 @@ The repo root stays Hermes-compatible, but all real implementation lives in `src
 ```text
 .
 ├── __init__.py
+├── cli.py
 ├── plugin.yaml
 ├── pyproject.toml
 ├── schemas.py
@@ -83,6 +84,15 @@ hermes a2a card
 Treat `hermes-a2a` as the reliable command until Hermes core exposes
 standalone plugin CLI discovery in your installation.
 
+This plugin registers the `a2a` command through both `ctx.register_cli_command`
+and a repo-root `cli.py` compatibility shim. Current Hermes core integration is
+tracked upstream in [NousResearch/hermes-agent#13643](https://github.com/NousResearch/hermes-agent/pull/13643).
+After installing a Hermes build with that support, verify the top-level path:
+
+```bash
+hermes a2a status
+```
+
 ## Runtime surfaces
 
 - Inbound server:
@@ -112,7 +122,9 @@ standalone plugin CLI discovery in your installation.
   - `hermes-a2a task cancel <id>`
 
   Hermes versions with standalone plugin CLI discovery may additionally support
-  the same commands under `hermes a2a ...`.
+  the same commands under `hermes a2a ...`; see
+  [NousResearch/hermes-agent#13643](https://github.com/NousResearch/hermes-agent/pull/13643)
+  for the upstream CLI wiring.
 
 ## Config
 

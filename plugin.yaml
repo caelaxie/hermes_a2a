@@ -7,3 +7,5 @@ provides_tools:
   - a2a_get_task
   - a2a_cancel_task
   - a2a_delegate
+provides_cli_commands:
+  - a2a
