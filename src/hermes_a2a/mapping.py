@@ -32,29 +32,39 @@ def extract_text_from_message(message: dict | None) -> str:
     for part in parts:
         if not isinstance(part, dict):
             raise ValueError("Message.parts entries must be objects")
-        if isinstance(part.get("text"), str):
+        content_fields = [field for field in ("text", "raw", "url", "data") if field in part]
+        if len(content_fields) != 1:
+            raise ValueError("Message.parts entries must contain exactly one of text, raw, url, or data")
+        field = content_fields[0]
+        if field == "text":
+            if not isinstance(part["text"], str):
+                raise ValueError("Text parts must contain string text")
             texts.append(part["text"])
             continue
-        if isinstance(part.get("data"), dict):
-            data_part = part["data"]
-            data = data_part.get("data") if isinstance(data_part.get("data"), dict) else data_part
-            texts.append(json.dumps(data, sort_keys=True))
+        if field == "data":
+            texts.append("data: " + json.dumps(part["data"], sort_keys=True))
             continue
-        if isinstance(part.get("file"), dict):
-            file_part = part["file"]
-            file_ref = file_part.get("fileWithUri") or file_part.get("fileWithBytes")
-            if not file_ref:
-                raise ValueError("File parts must include fileWithUri or fileWithBytes")
-            details = [str(file_ref)]
-            if file_part.get("name"):
-                details.append(f"name={file_part['name']}")
-            if file_part.get("mediaType"):
-                details.append(f"mediaType={file_part['mediaType']}")
+        if field == "url":
+            if not isinstance(part["url"], str):
+                raise ValueError("URL parts must contain string url")
+            details = [part["url"]]
+            if part.get("filename"):
+                details.append(f"filename={part['filename']}")
+            if part.get("mediaType"):
+                details.append(f"mediaType={part['mediaType']}")
             texts.append("file: " + " ".join(details))
             continue
-        raise ValueError("Message.parts entries must contain text, data, or file")
+        if not isinstance(part["raw"], str):
+            raise ValueError("Raw parts must contain base64 string raw content")
+        details = [part["raw"]]
+        if part.get("filename"):
+            details.append(f"filename={part['filename']}")
+        if part.get("mediaType"):
+            details.append(f"mediaType={part['mediaType']}")
+        texts.append("raw: " + " ".join(details))
+        continue
     if not texts:
-        raise ValueError("Message.parts must contain text, data, or file content")
+        raise ValueError("Message.parts must contain text, raw, url, or data content")
     return "\n".join(texts)
 
 
@@ -62,12 +72,12 @@ def build_text_part(text: str) -> dict:
     return {"text": text}
 
 
-def build_data_part(data: dict) -> dict:
-    return {"data": {"data": data}}
+def build_data_part(data) -> dict:
+    return {"data": data, "mediaType": "application/json"}
 
 
 def build_file_part(uri: str) -> dict:
-    return {"file": {"fileWithUri": uri}}
+    return {"url": uri}
 
 
 def build_message(
@@ -171,12 +181,6 @@ def apply_hermes_event(task: dict, event: HermesEvent) -> dict:
                 "taskId": task["id"],
                 "contextId": task["contextId"],
                 "status": task["status"],
-                "final": state in {
-                    "TASK_STATE_COMPLETED",
-                    "TASK_STATE_FAILED",
-                    "TASK_STATE_CANCELLED",
-                    "TASK_STATE_REJECTED",
-                },
             },
         }
 

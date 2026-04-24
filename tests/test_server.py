@@ -22,12 +22,11 @@ if sys_path not in os.sys.path:
 
 from hermes_a2a.config import A2APluginConfig
 from hermes_a2a.protocol import (
+    ERROR_INVALID_PARAMS,
     ERROR_METHOD_NOT_FOUND,
     ERROR_UNSUPPORTED_OPERATION,
     ERROR_VERSION_NOT_SUPPORTED,
     PROTOCOL_VERSION,
-    push_config_name,
-    task_name,
 )
 from hermes_a2a.server import create_server
 from hermes_a2a.tools import tool_a2a_delegate, tool_a2a_get_task
@@ -106,6 +105,50 @@ class ServerTests(unittest.TestCase):
             for child in value:
                 self._assert_no_legacy_task_fields(child)
 
+    def _assert_one_of(self, value: dict, fields: tuple[str, ...]) -> str:
+        present = [field for field in fields if field in value]
+        self.assertEqual(len(present), 1)
+        return present[0]
+
+    def _assert_stream_response(self, value: dict) -> str:
+        field = self._assert_one_of(value, ("task", "message", "statusUpdate", "artifactUpdate"))
+        if field == "statusUpdate":
+            self.assertNotIn("final", value["statusUpdate"])
+        return field
+
+    def _assert_part(self, part: dict) -> str:
+        field = self._assert_one_of(part, ("text", "raw", "url", "data"))
+        self.assertNotIn("file", part)
+        self.assertNotIn("kind", part)
+        self.assertNotIn("type", part)
+        return field
+
+    def _assert_message(self, message: dict) -> None:
+        self.assertIn(message["role"], {"ROLE_USER", "ROLE_AGENT"})
+        self.assertTrue(message["messageId"])
+        for part in message["parts"]:
+            self._assert_part(part)
+
+    def _assert_task(self, task: dict) -> None:
+        self._assert_no_legacy_task_fields(task)
+        self.assertIn("history", task)
+        self.assertNotIn("messages", task)
+        self.assertIn(task["status"]["state"], {
+            "TASK_STATE_SUBMITTED",
+            "TASK_STATE_WORKING",
+            "TASK_STATE_COMPLETED",
+            "TASK_STATE_FAILED",
+            "TASK_STATE_CANCELED",
+            "TASK_STATE_INPUT_REQUIRED",
+            "TASK_STATE_REJECTED",
+            "TASK_STATE_AUTH_REQUIRED",
+        })
+        for message in task.get("history", []):
+            self._assert_message(message)
+        for artifact in task.get("artifacts", []):
+            for part in artifact["parts"]:
+                self._assert_part(part)
+
     def _start_callback_server(self):
         callback = {}
 
@@ -150,14 +193,15 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(card["skills"][0]["inputModes"], ["text/plain", "application/json"])
 
         task_payload = self._read_rpc("SendMessage", {"message": self._message("hello")})
+        self.assertEqual(self._assert_one_of(task_payload["result"], ("task", "message")), "task")
         task = task_payload["result"]["task"]
         task_id = task["id"]
-        fetched = self._read_rpc("GetTask", {"name": task_name(task_id), "historyLength": 1})
+        fetched = self._read_rpc("GetTask", {"id": task_id, "historyLength": 1})
 
         self.assertEqual(task["status"]["state"], "TASK_STATE_COMPLETED")
         self.assertEqual(fetched["result"]["id"], task_id)
         self.assertEqual(len(fetched["result"]["history"]), 1)
-        self._assert_no_legacy_task_fields(task)
+        self._assert_task(task)
 
     def test_bearer_agent_card_remains_public_and_declares_security(self) -> None:
         config = A2APluginConfig(
@@ -216,10 +260,13 @@ class ServerTests(unittest.TestCase):
             {"message": self._message("hello")},
         )
         stream_results = [event["result"] for event in stream_events]
+        for result in stream_results:
+            self._assert_stream_response(result)
         self.assertTrue(any("statusUpdate" in result for result in stream_results))
         self.assertTrue(any("artifactUpdate" in result for result in stream_results))
         task = stream_results[-1]["task"]
         task_id = task["id"]
+        self._assert_task(task)
 
         list_payload = self._read_rpc(
             "ListTasks",
@@ -233,39 +280,37 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(list_payload["result"]["nextPageToken"], "")
         self.assertNotIn("artifacts", list_payload["result"]["tasks"][0])
 
-        cancel_payload = self._read_rpc("CancelTask", {"name": task_name(task_id)})
-        self.assertEqual(cancel_payload["result"]["status"]["state"], "TASK_STATE_CANCELLED")
+        cancel_payload = self._read_rpc("CancelTask", {"id": task_id})
+        self.assertEqual(cancel_payload["result"]["status"]["state"], "TASK_STATE_CANCELED")
 
         input_payload = self._read_rpc("SendMessage", {"message": self._message("need input")})
         input_task = input_payload["result"]["task"]
-        replay = self._read_stream("SubscribeToTask", {"name": task_name(input_task["id"])})
+        replay = self._read_stream("SubscribeToTask", {"id": input_task["id"]})
         self.assertIn("task", replay[0]["result"])
         self.assertEqual(replay[0]["result"]["task"]["status"]["state"], "TASK_STATE_INPUT_REQUIRED")
 
         callback, callback_url, callback_server, callback_thread = self._start_callback_server()
 
-        config_name = push_config_name(task_id, "cfg-1")
         set_payload = self._read_rpc(
             "CreateTaskPushNotificationConfig",
             {
-                "parent": task_name(task_id),
-                "configId": "cfg-1",
-                "config": {
-                    "pushNotificationConfig": {
-                        "url": callback_url,
-                        "token": "tok",
-                        "authentication": {
-                            "schemes": ["Bearer"],
-                            "credentials": "secret",
-                        },
-                    }
+                "taskId": task_id,
+                "pushNotificationConfig": {
+                    "id": "cfg-1",
+                    "url": callback_url,
+                    "token": "tok",
+                    "authentication": {
+                        "scheme": "Bearer",
+                        "credentials": "secret",
+                    },
                 },
             },
         )
-        get_payload = self._read_rpc("GetTaskPushNotificationConfig", {"name": config_name})
-        list_configs = self._read_rpc("ListTaskPushNotificationConfig", {"parent": task_name(task_id)})
+        get_payload = self._read_rpc("GetTaskPushNotificationConfig", {"taskId": task_id, "id": "cfg-1"})
+        list_configs = self._read_rpc("ListTaskPushNotificationConfigs", {"taskId": task_id})
 
-        self.assertEqual(set_payload["result"]["name"], config_name)
+        self.assertEqual(set_payload["result"]["taskId"], task_id)
+        self.assertEqual(set_payload["result"]["pushNotificationConfig"]["id"], "cfg-1")
         self.assertEqual(get_payload["result"]["pushNotificationConfig"]["url"], callback_url)
         self.assertEqual(len(list_configs["result"]["configs"]), 1)
         self.assertEqual(list_configs["result"]["nextPageToken"], "")
@@ -289,8 +334,12 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(callback["content_type"], "application/a2a+json")
         self.assertEqual(callback["authorization"], "Bearer secret")
         self.assertIn("statusUpdate", callback["payload"])
+        self._assert_stream_response(callback["payload"])
 
-        delete_payload = self._read_rpc("DeleteTaskPushNotificationConfig", {"name": config_name})
+        delete_payload = self._read_rpc(
+            "DeleteTaskPushNotificationConfig",
+            {"taskId": task_id, "id": "cfg-1"},
+        )
         self.assertIsNone(delete_payload["result"])
 
     def test_send_message_configuration_registers_push_config(self) -> None:
@@ -301,12 +350,15 @@ class ServerTests(unittest.TestCase):
                 {
                     "message": self._message("hello with inline callback"),
                     "configuration": {
-                        "pushNotificationConfig": {
-                            "id": "inline",
-                            "url": callback_url,
-                            "authentication": {
-                                "schemes": ["Bearer"],
-                                "credentials": "inline-secret",
+                        "taskPushNotificationConfig": {
+                            "taskId": "",
+                            "pushNotificationConfig": {
+                                "id": "inline",
+                                "url": callback_url,
+                                "authentication": {
+                                    "scheme": "Bearer",
+                                    "credentials": "inline-secret",
+                                },
                             },
                         }
                     },
@@ -318,29 +370,31 @@ class ServerTests(unittest.TestCase):
             callback_thread.join(timeout=2)
 
         task = payload["result"]["task"]
-        config_name = push_config_name(task["id"], "inline")
-        stored = self._read_rpc("GetTaskPushNotificationConfig", {"name": config_name})
+        stored = self._read_rpc("GetTaskPushNotificationConfig", {"taskId": task["id"], "id": "inline"})
 
         self.assertEqual(stored["result"]["pushNotificationConfig"]["url"], callback_url)
         self.assertEqual(callback["content_type"], "application/a2a+json")
         self.assertEqual(callback["authorization"], "Bearer inline-secret")
         self.assertIn("statusUpdate", callback["payload"])
+        self._assert_stream_response(callback["payload"])
 
-    def test_data_and_file_parts_are_not_silently_dropped(self) -> None:
+    def test_official_part_shapes_are_not_silently_dropped(self) -> None:
         data_payload = self._read_rpc(
             "SendMessage",
             {
                 "message": {
                     "messageId": str(uuid4()),
                     "role": "ROLE_USER",
-                    "parts": [{"data": {"data": {"question": "structured"}}}],
+                    "parts": [{"data": {"question": "structured"}}],
                 }
             },
         )
-        data_artifact = data_payload["result"]["task"]["artifacts"][0]["parts"][0]["text"]
-        self.assertIn('"question": "structured"', data_artifact)
+        data_part = data_payload["result"]["task"]["artifacts"][0]["parts"][0]
+        self.assertEqual(self._assert_part(data_part), "data")
+        self.assertEqual(data_part["data"], {"question": "structured"})
+        self.assertEqual(data_part["mediaType"], "application/json")
 
-        file_payload = self._read_rpc(
+        raw_payload = self._read_rpc(
             "SendMessage",
             {
                 "message": {
@@ -348,21 +402,51 @@ class ServerTests(unittest.TestCase):
                     "role": "ROLE_USER",
                     "parts": [
                         {
-                            "file": {
-                                "fileWithUri": "https://example.test/doc.txt",
-                                "name": "doc.txt",
-                                "mediaType": "text/plain",
-                            }
+                            "raw": "aGVsbG8=",
+                            "filename": "doc.txt",
+                            "mediaType": "text/plain",
                         }
                     ],
                 }
             },
         )
-        file_artifact = file_payload["result"]["task"]["artifacts"][0]["parts"][0]["file"][
-            "fileWithUri"
-        ]
-        self.assertIn("https://example.test/doc.txt", file_artifact)
-        self.assertIn("mediaType=text/plain", file_artifact)
+        raw_part = raw_payload["result"]["task"]["artifacts"][0]["parts"][0]
+        self.assertEqual(self._assert_part(raw_part), "text")
+        self.assertIn("raw: aGVsbG8=", raw_part["text"])
+        self.assertIn("filename=doc.txt", raw_part["text"])
+
+        url_payload = self._read_rpc(
+            "SendMessage",
+            {
+                "message": {
+                    "messageId": str(uuid4()),
+                    "role": "ROLE_USER",
+                    "parts": [
+                        {
+                            "url": "https://example.test/doc.txt",
+                            "filename": "doc.txt",
+                            "mediaType": "text/plain",
+                        }
+                    ],
+                }
+            },
+        )
+        url_part = url_payload["result"]["task"]["artifacts"][0]["parts"][0]
+        self.assertEqual(self._assert_part(url_part), "url")
+        self.assertIn("https://example.test/doc.txt", url_part["url"])
+        self.assertIn("mediaType=text/plain", url_part["url"])
+
+        invalid = self._read_rpc(
+            "SendMessage",
+            {
+                "message": {
+                    "messageId": str(uuid4()),
+                    "role": "ROLE_USER",
+                    "parts": [{"text": "hello", "data": {"extra": True}}],
+                }
+            },
+        )
+        self.assertEqual(invalid["error"]["code"], ERROR_INVALID_PARAMS)
 
     def test_list_tasks_status_timestamp_after_parses_offsets(self) -> None:
         payload = self._read_rpc("SendMessage", {"message": self._message("offset filter")})
