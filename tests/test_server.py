@@ -216,6 +216,12 @@ class ServerTests(unittest.TestCase):
         self._assert_task(task)
 
     def test_bearer_agent_card_remains_public_and_declares_security(self) -> None:
+        try:
+            from a2a.types.a2a_pb2 import AgentCard
+            from google.protobuf.json_format import ParseDict
+        except ImportError as exc:
+            self.skipTest(f"a2a-sdk protobuf parser unavailable: {exc}")
+
         config = A2APluginConfig(
             host="127.0.0.1",
             port=0,
@@ -242,7 +248,9 @@ class ServerTests(unittest.TestCase):
                     }
                 },
             )
-            self.assertEqual(card["security"], [{"bearerAuth": []}])
+            self.assertNotIn("security", card)
+            self.assertEqual(card["securityRequirements"], [{"schemes": {"bearerAuth": []}}])
+            ParseDict(card, AgentCard(), ignore_unknown_fields=False)
 
             payload = json.dumps(
                 {
