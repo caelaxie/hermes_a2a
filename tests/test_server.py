@@ -175,6 +175,13 @@ class ServerTests(unittest.TestCase):
             f"{self.server.base_url}/.well-known/agent-card.json", timeout=5
         ) as response:
             card = json.loads(response.read().decode("utf-8"))
+            cache_control = response.getheader("Cache-Control")
+            etag = response.getheader("ETag")
+
+        with urllib.request.urlopen(
+            f"{self.server.base_url}/.well-known/agent-card.json", timeout=5
+        ) as response:
+            repeat_etag = response.getheader("ETag")
 
         self.assertEqual(
             card["supportedInterfaces"],
@@ -191,6 +198,9 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("protocolVersion", card)
         self.assertNotIn("preferredTransport", card)
         self.assertEqual(card["skills"][0]["inputModes"], ["text/plain", "application/json"])
+        self.assertEqual(cache_control, "public, max-age=300")
+        self.assertTrue(etag)
+        self.assertEqual(repeat_etag, etag)
 
         task_payload = self._read_rpc("SendMessage", {"message": self._message("hello")})
         self.assertEqual(self._assert_one_of(task_payload["result"], ("task", "message")), "task")
@@ -282,6 +292,8 @@ class ServerTests(unittest.TestCase):
 
         cancel_payload = self._read_rpc("CancelTask", {"id": task_id})
         self.assertEqual(cancel_payload["result"]["status"]["state"], "TASK_STATE_CANCELED")
+        terminal_subscribe = self._read_rpc("SubscribeToTask", {"id": task_id})
+        self.assertEqual(terminal_subscribe["error"]["code"], ERROR_UNSUPPORTED_OPERATION)
 
         input_payload = self._read_rpc("SendMessage", {"message": self._message("need input")})
         input_task = input_payload["result"]["task"]
@@ -295,14 +307,12 @@ class ServerTests(unittest.TestCase):
             "CreateTaskPushNotificationConfig",
             {
                 "taskId": task_id,
-                "pushNotificationConfig": {
-                    "id": "cfg-1",
-                    "url": callback_url,
-                    "token": "tok",
-                    "authentication": {
-                        "scheme": "Bearer",
-                        "credentials": "secret",
-                    },
+                "id": "cfg-1",
+                "url": callback_url,
+                "token": "tok",
+                "authentication": {
+                    "scheme": "Bearer",
+                    "credentials": "secret",
                 },
             },
         )
@@ -310,9 +320,12 @@ class ServerTests(unittest.TestCase):
         list_configs = self._read_rpc("ListTaskPushNotificationConfigs", {"taskId": task_id})
 
         self.assertEqual(set_payload["result"]["taskId"], task_id)
-        self.assertEqual(set_payload["result"]["pushNotificationConfig"]["id"], "cfg-1")
-        self.assertEqual(get_payload["result"]["pushNotificationConfig"]["url"], callback_url)
+        self.assertEqual(set_payload["result"]["id"], "cfg-1")
+        self.assertEqual(set_payload["result"]["url"], callback_url)
+        self.assertEqual(set_payload["result"]["token"], "tok")
+        self.assertEqual(get_payload["result"]["url"], callback_url)
         self.assertEqual(len(list_configs["result"]["configs"]), 1)
+        self.assertEqual(list_configs["result"]["configs"][0]["id"], "cfg-1")
         self.assertEqual(list_configs["result"]["nextPageToken"], "")
 
         try:
@@ -352,13 +365,11 @@ class ServerTests(unittest.TestCase):
                     "configuration": {
                         "taskPushNotificationConfig": {
                             "taskId": "",
-                            "pushNotificationConfig": {
-                                "id": "inline",
-                                "url": callback_url,
-                                "authentication": {
-                                    "scheme": "Bearer",
-                                    "credentials": "inline-secret",
-                                },
+                            "id": "inline",
+                            "url": callback_url,
+                            "authentication": {
+                                "scheme": "Bearer",
+                                "credentials": "inline-secret",
                             },
                         }
                     },
@@ -372,7 +383,9 @@ class ServerTests(unittest.TestCase):
         task = payload["result"]["task"]
         stored = self._read_rpc("GetTaskPushNotificationConfig", {"taskId": task["id"], "id": "inline"})
 
-        self.assertEqual(stored["result"]["pushNotificationConfig"]["url"], callback_url)
+        self.assertEqual(stored["result"]["taskId"], task["id"])
+        self.assertEqual(stored["result"]["id"], "inline")
+        self.assertEqual(stored["result"]["url"], callback_url)
         self.assertEqual(callback["content_type"], "application/a2a+json")
         self.assertEqual(callback["authorization"], "Bearer inline-secret")
         self.assertIn("statusUpdate", callback["payload"])
@@ -474,10 +487,16 @@ class ServerTests(unittest.TestCase):
             {"message": self._message("hello")},
             version=None,
         )
+        unsupported_version = self._read_rpc(
+            "SendMessage",
+            {"message": self._message("hello")},
+            version="0.3",
+        )
         legacy = self._read_rpc("message/send", {"message": self._message("hello")})
         extended = self._read_rpc("GetExtendedAgentCard", {})
 
         self.assertEqual(missing_version["error"]["code"], ERROR_VERSION_NOT_SUPPORTED)
+        self.assertEqual(unsupported_version["error"]["code"], ERROR_VERSION_NOT_SUPPORTED)
         self.assertEqual(legacy["error"]["code"], ERROR_METHOD_NOT_FOUND)
         self.assertEqual(extended["error"]["code"], ERROR_UNSUPPORTED_OPERATION)
 
