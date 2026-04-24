@@ -245,7 +245,7 @@ def build_agent_card(config: A2APluginConfig) -> dict:
                 }
             }
         }
-        card["security"] = [{"bearerAuth": []}]
+        card["securityRequirements"] = [{"schemes": {"bearerAuth": []}}]
     return card
 
 

@@ -6,6 +6,7 @@ import io
 import json
 import sys
 import unittest
+from argparse import Namespace
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -27,6 +28,18 @@ class CliEntrypointTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["plugin"], "a2a")
         self.assertEqual(payload["status"], "ok")
+        self.assertIn("`hermes-a2a serve`", payload["message"])
+        self.assertIn("only works on Hermes versions", payload["message"])
+
+    def test_usage_prefers_standalone_console_script(self) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            cli.handle_cli(Namespace(a2a_command=None))
+
+        self.assertEqual(
+            stdout.getvalue().strip(),
+            "Usage: hermes-a2a {status|card|serve|agents list|task get|task cancel}",
+        )
 
 
 if __name__ == "__main__":

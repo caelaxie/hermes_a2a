@@ -9,6 +9,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+DEFAULT_TIMEOUT_SECONDS = 120.0
+
+
 def _truthy(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
@@ -36,7 +39,7 @@ class A2APluginConfig:
     store_path: str = ""
     exported_skills: list[str] = field(default_factory=list)
     remote_agents: list[RemoteAgentPreset] = field(default_factory=list)
-    default_timeout_seconds: float = 10.0
+    default_timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     allow_runtime_write: bool = True
     execution_adapter: str = "hermes"
     hermes_command: str = "hermes"
@@ -85,6 +88,7 @@ class A2APluginConfig:
                     for agent in self.remote_agents
                 ],
                 "execution_adapter": self.execution_adapter,
+                "default_timeout_seconds": self.default_timeout_seconds,
                 "hermes_command": self.hermes_command,
                 "hermes_extra_args": list(self.hermes_extra_args),
             },
@@ -156,7 +160,8 @@ def load_config() -> A2APluginConfig:
         exported_skills=exported_skills,
         remote_agents=remote_agents,
         default_timeout_seconds=float(
-            os.getenv("A2A_DEFAULT_TIMEOUT_SECONDS", "10").strip() or "10"
+            os.getenv("A2A_DEFAULT_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS)).strip()
+            or str(DEFAULT_TIMEOUT_SECONDS)
         ),
         allow_runtime_write=_truthy(os.getenv("A2A_ALLOW_RUNTIME_WRITE", "true")),
         execution_adapter=execution_adapter,

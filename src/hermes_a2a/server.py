@@ -109,9 +109,9 @@ class A2AService:
             "local_tasks": len(self.store.list_tasks()),
         }
         payload["message"] = (
-            "Hermes A2A bridge is configured. Start `hermes-a2a serve` "
-            "(or `hermes a2a serve` on Hermes versions with standalone plugin "
-            "CLI discovery) to expose the inbound JSON-RPC + SSE surface."
+            "Hermes A2A bridge is configured. Start the inbound JSON-RPC + SSE "
+            "surface with `hermes-a2a serve`. `hermes a2a serve` only works on "
+            "Hermes versions that expose standalone plugin CLI commands."
         )
         return payload
 
@@ -126,13 +126,21 @@ class A2AService:
         stream: bool,
         metadata: dict | None = None,
     ) -> Iterable:
+        metadata = dict(metadata or {})
+        hermes_session = self.store.get_hermes_session(task_id, context_id)
+        if hermes_session:
+            metadata["hermes_session_id"] = hermes_session["hermesSessionId"]
         # Existing tasks represent continuation. Streaming still uses the
         # adapter's streaming method because the transport contract, not task
         # freshness, decides how updates should be delivered to the caller.
         existing = self.store.get_task(task_id)
         if existing is None:
-            return self.adapter.stream(task_id, context_id, message_text, metadata) if stream else self.adapter.start(task_id, context_id, message_text, metadata)
-        return self.adapter.stream(task_id, context_id, message_text, metadata) if stream else self.adapter.continue_task(task_id, context_id, message_text, metadata)
+            if stream:
+                return self.adapter.stream(task_id, context_id, message_text, metadata)
+            return self.adapter.start(task_id, context_id, message_text, metadata)
+        if stream:
+            return self.adapter.stream(task_id, context_id, message_text, metadata)
+        return self.adapter.continue_task(task_id, context_id, message_text, metadata)
 
     def _notify_push(self, task_id: str, stream_response: dict) -> None:
         for push_config in self.store.list_push_configs_for_task(task_id):
@@ -195,6 +203,11 @@ class A2AService:
             stream=stream,
             metadata={"mode": "stream" if stream else "send"},
         ):
+            hermes_session_id = str(
+                adapter_event.metadata.get("hermes_session_id") or ""
+            ).strip()
+            if hermes_session_id:
+                self.store.set_hermes_session(task_id, context_id, hermes_session_id)
             stream_response = apply_hermes_event(task, adapter_event)
             self.store.append_event(task_id, stream_response)
             events.append(stream_response)

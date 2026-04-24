@@ -119,6 +119,22 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
         lines = [line for line in stdout.splitlines() if not line.startswith("session_id:")]
         return self._truncate("\n".join(lines).strip())
 
+    def _extract_session_id(self, stdout: str) -> str:
+        for line in stdout.splitlines():
+            label, separator, value = line.partition(":")
+            if not separator:
+                continue
+            if label.strip() in {"session_id", "Session"}:
+                session_id = value.strip()
+                if session_id:
+                    return session_id
+        return ""
+
+    def _session_id_from_metadata(self, metadata: dict | None) -> str:
+        if not isinstance(metadata, dict):
+            return ""
+        return str(metadata.get("hermes_session_id") or "").strip()
+
     def _reserve_process_slot(self, task_id: str) -> None:
         with self._process_lock:
             self._cancel_requested.discard(task_id)
@@ -224,8 +240,17 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
                 stderr,
             )
 
-    def _run(self, task_id: str, context_id: str, message: str) -> Iterable[HermesEvent]:
-        command = [self.command, "chat", "--quiet", *self.extra_args, "-q", message]
+    def _run(
+        self,
+        task_id: str,
+        context_id: str,
+        message: str,
+        resume_session_id: str = "",
+    ) -> Iterable[HermesEvent]:
+        command = [self.command, "chat", "--quiet", *self.extra_args]
+        if resume_session_id:
+            command.extend(["--resume", resume_session_id])
+        command.extend(["-q", message])
         self._reserve_process_slot(task_id)
         try:
             yield HermesEvent(
@@ -250,7 +275,9 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
             if self._is_cancel_requested(task_id):
                 return
 
-            stdout = self._clean_stdout(completed.stdout or "")
+            raw_stdout = completed.stdout or ""
+            hermes_session_id = self._extract_session_id(raw_stdout)
+            stdout = self._clean_stdout(raw_stdout)
             if completed.returncode != 0:
                 yield HermesEvent(
                     kind="status",
@@ -278,7 +305,15 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
                 kind="status",
                 state="completed",
                 message="Hermes runtime execution completed",
-                metadata={"task_id": task_id, "context_id": context_id},
+                metadata={
+                    "task_id": task_id,
+                    "context_id": context_id,
+                    **(
+                        {"hermes_session_id": hermes_session_id}
+                        if hermes_session_id
+                        else {}
+                    ),
+                },
             )
         except subprocess.TimeoutExpired:
             yield HermesEvent(
@@ -306,8 +341,12 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
         message: str,
         metadata: dict | None = None,
     ) -> Iterable[HermesEvent]:
-        del metadata
-        return self._run(task_id, context_id, message)
+        return self._run(
+            task_id,
+            context_id,
+            message,
+            resume_session_id=self._session_id_from_metadata(metadata),
+        )
 
     def continue_task(
         self,
@@ -316,8 +355,12 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
         message: str,
         metadata: dict | None = None,
     ) -> Iterable[HermesEvent]:
-        del metadata
-        return self._run(task_id, context_id, message)
+        return self._run(
+            task_id,
+            context_id,
+            message,
+            resume_session_id=self._session_id_from_metadata(metadata),
+        )
 
     def stream(
         self,
@@ -326,8 +369,12 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
         message: str,
         metadata: dict | None = None,
     ) -> Iterable[HermesEvent]:
-        del metadata
-        return self._run(task_id, context_id, message)
+        return self._run(
+            task_id,
+            context_id,
+            message,
+            resume_session_id=self._session_id_from_metadata(metadata),
+        )
 
     def cancel(
         self,
