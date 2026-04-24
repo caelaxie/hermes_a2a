@@ -55,9 +55,7 @@ from .protocol import (
     encode_task_page_token,
     jsonrpc_error,
     jsonrpc_success,
-    parse_push_config_name,
     parse_rfc3339_timestamp,
-    parse_task_name,
     push_config_name,
 )
 from .store import SQLiteTaskStore
@@ -76,6 +74,13 @@ def _build_execution_adapter(config: A2APluginConfig) -> HermesExecutionAdapter:
         "Unsupported A2A_EXECUTION_ADAPTER "
         f"{config.execution_adapter!r}; expected 'hermes' or 'demo'"
     )
+
+
+def _required_string(params: dict, field: str) -> str:
+    value = str(params.get(field) or "").strip()
+    if not value:
+        raise ValueError(f"{field} is required")
+    return value
 
 
 class A2AService:
@@ -134,12 +139,10 @@ class A2AService:
             payload = json.dumps(stream_response, sort_keys=True).encode("utf-8")
             headers = {"Content-Type": A2A_CONTENT_TYPE}
             auth = push_config.get("authentication") or {}
-            schemes = [str(scheme).lower() for scheme in auth.get("schemes", [])]
+            scheme = str(auth.get("scheme") or "").strip()
             credentials = str(auth.get("credentials", "")).strip()
-            if credentials and "bearer" in schemes:
-                headers["Authorization"] = f"Bearer {credentials}"
-            elif credentials and schemes:
-                headers["Authorization"] = f"{schemes[0]} {credentials}"
+            if credentials and scheme:
+                headers["Authorization"] = f"{scheme} {credentials}"
             request = urllib.request.Request(
                 push_config["url"],
                 data=payload,
@@ -210,11 +213,19 @@ class A2AService:
     def _configure_push_from_send_message(self, task_id: str, configuration: dict) -> None:
         if not isinstance(configuration, dict):
             raise ValueError("SendMessageRequest.configuration must be an object")
-        push_config = configuration.get("pushNotificationConfig")
+        push_config_wrapper = configuration.get("taskPushNotificationConfig")
+        if push_config_wrapper is None:
+            return
+        if not isinstance(push_config_wrapper, dict):
+            raise ValueError("configuration.taskPushNotificationConfig must be an object")
+        configured_task_id = str(push_config_wrapper.get("taskId") or "").strip()
+        if configured_task_id and configured_task_id != task_id:
+            raise ValueError("taskPushNotificationConfig.taskId must be empty or match the task id")
+        push_config = push_config_wrapper.get("pushNotificationConfig")
         if push_config is None:
             return
         if not isinstance(push_config, dict):
-            raise ValueError("configuration.pushNotificationConfig must be an object")
+            raise ValueError("taskPushNotificationConfig.pushNotificationConfig must be an object")
         if not str(push_config.get("url", "")).strip():
             raise ValueError("pushNotificationConfig.url is required")
         config_id = str(push_config.get("id") or uuid4()).strip()
@@ -223,10 +234,7 @@ class A2AService:
         self.store.set_push_config(
             task_id,
             config_id,
-            {
-                "name": push_config_name(task_id, config_id),
-                "pushNotificationConfig": stored_push_config,
-            },
+            {"pushNotificationConfig": stored_push_config},
         )
 
     def get_task(self, task_id: str) -> dict:
@@ -310,36 +318,33 @@ class A2AService:
         }
 
     def create_push_config(self, params: dict) -> dict:
-        task_id = parse_task_name(str(params.get("parent") or ""))
+        task_id = _required_string(params, "taskId")
         self.get_task(task_id)
-        config_id = str(params.get("configId") or "").strip()
-        if not config_id:
-            raise ValueError("configId is required")
-        config = params.get("config") or {}
-        push_config = config.get("pushNotificationConfig") if isinstance(config, dict) else None
+        push_config = params.get("pushNotificationConfig")
         if not isinstance(push_config, dict):
-            raise ValueError("config.pushNotificationConfig is required")
+            raise ValueError("pushNotificationConfig is required")
         if not str(push_config.get("url", "")).strip():
             raise ValueError("pushNotificationConfig.url is required")
+        config_id = str(push_config.get("id") or uuid4()).strip()
+        stored_push_config = dict(push_config)
+        stored_push_config["id"] = config_id
         return self.store.set_push_config(
             task_id,
             config_id,
-            {
-                "name": push_config_name(task_id, config_id),
-                "pushNotificationConfig": push_config,
-            },
+            {"pushNotificationConfig": stored_push_config},
         )
 
     def get_push_config(self, params: dict) -> dict:
-        name = str(params.get("name") or "")
-        parse_push_config_name(name)
+        task_id = _required_string(params, "taskId")
+        config_id = _required_string(params, "id")
+        name = push_config_name(task_id, config_id)
         result = self.store.get_push_config(name)
         if result is None:
             raise KeyError(name)
         return result
 
     def list_push_configs(self, params: dict) -> dict:
-        task_id = parse_task_name(str(params.get("parent") or ""))
+        task_id = _required_string(params, "taskId")
         self.get_task(task_id)
         page_size = int(params.get("pageSize") or 50)
         if page_size < 1 or page_size > 100:
@@ -354,8 +359,9 @@ class A2AService:
         }
 
     def delete_push_config(self, params: dict) -> None:
-        name = str(params.get("name") or "")
-        parse_push_config_name(name)
+        task_id = _required_string(params, "taskId")
+        config_id = _required_string(params, "id")
+        name = push_config_name(task_id, config_id)
         if self.store.get_push_config(name) is None:
             raise KeyError(name)
         self.store.delete_push_config(name)
@@ -471,7 +477,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return
 
             if method == METHOD_GET_TASK:
-                task_id = parse_task_name(str(params.get("name") or ""))
+                task_id = _required_string(params, "id")
                 history_length = params.get("historyLength")
                 task = trim_task_for_response(
                     self._service.get_task(task_id),
@@ -485,12 +491,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return
 
             if method == METHOD_CANCEL_TASK:
-                task_id = parse_task_name(str(params.get("name") or ""))
+                task_id = _required_string(params, "id")
                 self._send_json(jsonrpc_success(request_id, self._service.cancel_task(task_id)))
                 return
 
             if method == METHOD_SUBSCRIBE_TO_TASK:
-                task_id = parse_task_name(str(params.get("name") or ""))
+                task_id = _required_string(params, "id")
                 self._send_stream(request_id, self._service.subscribe_task(task_id))
                 return
 

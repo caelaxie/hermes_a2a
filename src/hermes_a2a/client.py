@@ -16,7 +16,6 @@ from .protocol import (
     METHOD_SEND_MESSAGE,
     METHOD_SEND_STREAMING_MESSAGE,
     PROTOCOL_VERSION,
-    task_name,
 )
 
 
@@ -153,7 +152,7 @@ class A2AClient:
             "jsonrpc": "2.0",
             "id": "task-get",
             "method": METHOD_GET_TASK,
-            "params": {"name": task_name(task_id)},
+            "params": {"id": task_id},
         }
         with self._request("/rpc", request) as response:
             payload = json.loads(response.read().decode("utf-8"))
@@ -166,7 +165,7 @@ class A2AClient:
             "jsonrpc": "2.0",
             "id": "task-cancel",
             "method": METHOD_CANCEL_TASK,
-            "params": {"name": task_name(task_id)},
+            "params": {"id": task_id},
         }
         with self._request("/rpc", request) as response:
             payload = json.loads(response.read().decode("utf-8"))

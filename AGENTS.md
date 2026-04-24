@@ -69,7 +69,7 @@ The current inbound server exposes:
 - `POST /rpc` for official A2A 1.0 JSON-RPC methods: `SendMessage`,
   `SendStreamingMessage`, `GetTask`, `ListTasks`, `CancelTask`,
   `SubscribeToTask`, `CreateTaskPushNotificationConfig`,
-  `GetTaskPushNotificationConfig`, `ListTaskPushNotificationConfig`,
+  `GetTaskPushNotificationConfig`, `ListTaskPushNotificationConfigs`,
   `DeleteTaskPushNotificationConfig`, and `GetExtendedAgentCard`
 
 Legacy slash-style JSON-RPC methods and custom SSE replay endpoints are not

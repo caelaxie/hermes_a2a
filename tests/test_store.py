@@ -39,7 +39,6 @@ class StoreTests(unittest.TestCase):
                         "taskId": "task-1",
                         "contextId": "ctx-1",
                         "status": {"state": "TASK_STATE_WORKING"},
-                        "final": False,
                     }
                 },
             )
@@ -48,7 +47,6 @@ class StoreTests(unittest.TestCase):
                 "task-1",
                 "cfg-1",
                 {
-                    "name": config_name,
                     "pushNotificationConfig": {
                         "url": "https://callback.test",
                         "token": "token",
@@ -66,5 +64,6 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(stored["id"], "task-1")
         self.assertEqual(seq, 1)
         self.assertEqual(events[0]["statusUpdate"]["status"]["state"], "TASK_STATE_WORKING")
+        self.assertEqual(push["taskId"], "task-1")
         self.assertEqual(push["pushNotificationConfig"]["url"], "https://callback.test")
         self.assertEqual(remote["agentUrl"], "https://agent.test")

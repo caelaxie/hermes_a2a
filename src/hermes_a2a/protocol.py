@@ -20,7 +20,7 @@ METHOD_CANCEL_TASK = "CancelTask"
 METHOD_SUBSCRIBE_TO_TASK = "SubscribeToTask"
 METHOD_CREATE_PUSH_CONFIG = "CreateTaskPushNotificationConfig"
 METHOD_GET_PUSH_CONFIG = "GetTaskPushNotificationConfig"
-METHOD_LIST_PUSH_CONFIGS = "ListTaskPushNotificationConfig"
+METHOD_LIST_PUSH_CONFIGS = "ListTaskPushNotificationConfigs"
 METHOD_DELETE_PUSH_CONFIG = "DeleteTaskPushNotificationConfig"
 METHOD_GET_EXTENDED_AGENT_CARD = "GetExtendedAgentCard"
 
@@ -28,7 +28,7 @@ TASK_STATE_SUBMITTED = "TASK_STATE_SUBMITTED"
 TASK_STATE_WORKING = "TASK_STATE_WORKING"
 TASK_STATE_COMPLETED = "TASK_STATE_COMPLETED"
 TASK_STATE_FAILED = "TASK_STATE_FAILED"
-TASK_STATE_CANCELLED = "TASK_STATE_CANCELLED"
+TASK_STATE_CANCELED = "TASK_STATE_CANCELED"
 TASK_STATE_INPUT_REQUIRED = "TASK_STATE_INPUT_REQUIRED"
 TASK_STATE_REJECTED = "TASK_STATE_REJECTED"
 TASK_STATE_AUTH_REQUIRED = "TASK_STATE_AUTH_REQUIRED"
@@ -36,7 +36,7 @@ TASK_STATE_AUTH_REQUIRED = "TASK_STATE_AUTH_REQUIRED"
 TERMINAL_TASK_STATES = {
     TASK_STATE_COMPLETED,
     TASK_STATE_FAILED,
-    TASK_STATE_CANCELLED,
+    TASK_STATE_CANCELED,
     TASK_STATE_REJECTED,
 }
 
@@ -53,8 +53,7 @@ STATE_MAP = {
     "working": TASK_STATE_WORKING,
     "completed": TASK_STATE_COMPLETED,
     "failed": TASK_STATE_FAILED,
-    "cancelled": TASK_STATE_CANCELLED,
-    "canceled": TASK_STATE_CANCELLED,
+    "canceled": TASK_STATE_CANCELED,
     "input-required": TASK_STATE_INPUT_REQUIRED,
     "input_required": TASK_STATE_INPUT_REQUIRED,
     "requires-input": TASK_STATE_INPUT_REQUIRED,
@@ -85,36 +84,8 @@ def jsonrpc_error(request_id, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
-def task_name(task_id: str) -> str:
-    return f"tasks/{task_id}"
-
-
-def parse_task_name(name: str) -> str:
-    value = str(name or "").strip()
-    prefix = "tasks/"
-    if not value.startswith(prefix) or "/" in value[len(prefix):] or not value[len(prefix):]:
-        raise ValueError("Expected task resource name in format tasks/{task_id}")
-    return value[len(prefix):]
-
-
 def push_config_name(task_id: str, config_id: str) -> str:
     return f"tasks/{task_id}/pushNotificationConfigs/{config_id}"
-
-
-def parse_push_config_name(name: str) -> tuple[str, str]:
-    value = str(name or "").strip()
-    parts = value.split("/")
-    if len(parts) != 4 or parts[0] != "tasks" or parts[2] != "pushNotificationConfigs":
-        raise ValueError(
-            "Expected push config resource name in format "
-            "tasks/{task_id}/pushNotificationConfigs/{config_id}"
-        )
-    if not parts[1] or not parts[3]:
-        raise ValueError(
-            "Expected push config resource name in format "
-            "tasks/{task_id}/pushNotificationConfigs/{config_id}"
-        )
-    return parts[1], parts[3]
 
 
 def encode_page_token(offset: int) -> str:

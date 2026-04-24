@@ -88,7 +88,7 @@ uv run hermes-a2a card
   - `POST /rpc` for the official A2A 1.0 JSON-RPC methods:
     `SendMessage`, `SendStreamingMessage`, `GetTask`, `ListTasks`,
     `CancelTask`, `SubscribeToTask`, `CreateTaskPushNotificationConfig`,
-    `GetTaskPushNotificationConfig`, `ListTaskPushNotificationConfig`,
+    `GetTaskPushNotificationConfig`, `ListTaskPushNotificationConfigs`,
     `DeleteTaskPushNotificationConfig`, and `GetExtendedAgentCard`
 - Outbound Hermes tools:
   - `a2a_status`
@@ -137,6 +137,10 @@ The plugin is configured through environment variables:
 
 - JSON-RPC requests must include `A2A-Version: 1.0`. Legacy slash-style methods
   such as `message/send` and old task/message/part response fields are not
+  supported.
+- Task RPCs use direct task IDs in params such as `{"id": "task-id"}`. Push
+  notification config RPCs use `taskId`, config `id`, and
+  `pushNotificationConfig`; resource-name params such as `tasks/{id}` are not
   supported.
 - By default the inbound server routes A2A `SendMessage` and
   `SendStreamingMessage` calls through `hermes chat -q ... --quiet`. Set

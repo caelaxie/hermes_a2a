@@ -213,7 +213,7 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
         return [
             HermesEvent(
                 kind="status",
-                state="cancelled",
+                state="canceled",
                 message="Hermes runtime subprocess cancellation requested",
                 metadata={"task_id": task_id, "context_id": context_id},
             )
@@ -350,7 +350,7 @@ class DemoHermesExecutionAdapter(HermesExecutionAdapter):
         return [
             HermesEvent(
                 kind="status",
-                state="cancelled",
+                state="canceled",
                 message="Hermes execution cancelled",
                 metadata={"task_id": task_id, "context_id": context_id},
             )

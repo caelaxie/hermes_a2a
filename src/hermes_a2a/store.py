@@ -153,7 +153,7 @@ class SQLiteTaskStore:
         push_config.setdefault("id", config_id)
         push_config.setdefault("url", "")
         push_config.setdefault("token", "")
-        stored = {"name": name, "pushNotificationConfig": push_config}
+        stored = {"taskId": task_id, "pushNotificationConfig": push_config}
         with self._lock, self._conn:
             self._conn.execute(
                 """
