@@ -88,7 +88,8 @@ uv run hermes-a2a card
     publishes an A2A 1.0 AgentCard with the JSON-RPC endpoint in
     `supportedInterfaces`; when `A2A_BEARER_TOKEN` is configured, the card
     advertises the required bearer auth scheme while remaining publicly
-    discoverable.
+    discoverable. Responses include `Cache-Control` and `ETag` headers so
+    clients can cache the card and detect changes.
   - `POST /rpc` for the official A2A 1.0 JSON-RPC methods:
     `SendMessage`, `SendStreamingMessage`, `GetTask`, `ListTasks`,
     `CancelTask`, `SubscribeToTask`, `CreateTaskPushNotificationConfig`,
@@ -143,9 +144,25 @@ The plugin is configured through environment variables:
   such as `message/send` and old task/message/part response fields are not
   supported.
 - Task RPCs use direct task IDs in params such as `{"id": "task-id"}`. Push
-  notification config RPCs use `taskId`, config `id`, and
-  `pushNotificationConfig`; resource-name params such as `tasks/{id}` are not
+  notification config RPCs use the flat A2A 1.0 `TaskPushNotificationConfig`
+  shape with `taskId`, config `id`, `url`, optional `token`, and optional
+  `authentication`; resource-name params such as `tasks/{id}` are not
   supported.
+
+Example push notification config request:
+
+```json
+{
+  "taskId": "task-id",
+  "id": "callback-1",
+  "url": "https://example.com/a2a/push",
+  "token": "task-callback-token",
+  "authentication": {
+    "scheme": "Bearer",
+    "credentials": "secret"
+  }
+}
+```
 - By default the inbound server routes A2A `SendMessage` and
   `SendStreamingMessage` calls through `hermes chat -q ... --quiet`. Set
   `A2A_EXECUTION_ADAPTER=demo` to use the deterministic demo adapter for

@@ -149,11 +149,11 @@ class SQLiteTaskStore:
     ) -> dict:
         now = utc_timestamp()
         name = push_config_name(task_id, config_id)
-        push_config = dict(config.get("pushNotificationConfig") or config)
-        push_config.setdefault("id", config_id)
-        push_config.setdefault("url", "")
-        push_config.setdefault("token", "")
-        stored = {"taskId": task_id, "pushNotificationConfig": push_config}
+        stored = dict(config)
+        stored["taskId"] = task_id
+        stored["id"] = config_id
+        stored.setdefault("url", "")
+        stored.setdefault("token", "")
         with self._lock, self._conn:
             self._conn.execute(
                 """
@@ -170,8 +170,8 @@ class SQLiteTaskStore:
                     name,
                     task_id,
                     config_id,
-                    str(push_config.get("url", "")),
-                    str(push_config.get("token", "")),
+                    str(stored.get("url", "")),
+                    str(stored.get("token", "")),
                     json.dumps(stored, sort_keys=True),
                     now,
                     now,

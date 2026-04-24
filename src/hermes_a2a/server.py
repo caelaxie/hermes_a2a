@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import urllib.request
@@ -134,8 +135,7 @@ class A2AService:
         return self.adapter.stream(task_id, context_id, message_text, metadata) if stream else self.adapter.continue_task(task_id, context_id, message_text, metadata)
 
     def _notify_push(self, task_id: str, stream_response: dict) -> None:
-        for config in self.store.list_push_configs_for_task(task_id):
-            push_config = config["pushNotificationConfig"]
+        for push_config in self.store.list_push_configs_for_task(task_id):
             payload = json.dumps(stream_response, sort_keys=True).encode("utf-8")
             headers = {"Content-Type": A2A_CONTENT_TYPE}
             auth = push_config.get("authentication") or {}
@@ -221,20 +221,16 @@ class A2AService:
         configured_task_id = str(push_config_wrapper.get("taskId") or "").strip()
         if configured_task_id and configured_task_id != task_id:
             raise ValueError("taskPushNotificationConfig.taskId must be empty or match the task id")
-        push_config = push_config_wrapper.get("pushNotificationConfig")
-        if push_config is None:
-            return
-        if not isinstance(push_config, dict):
-            raise ValueError("taskPushNotificationConfig.pushNotificationConfig must be an object")
-        if not str(push_config.get("url", "")).strip():
-            raise ValueError("pushNotificationConfig.url is required")
-        config_id = str(push_config.get("id") or uuid4()).strip()
-        stored_push_config = dict(push_config)
+        if not str(push_config_wrapper.get("url", "")).strip():
+            raise ValueError("taskPushNotificationConfig.url is required")
+        config_id = str(push_config_wrapper.get("id") or uuid4()).strip()
+        stored_push_config = dict(push_config_wrapper)
+        stored_push_config["taskId"] = task_id
         stored_push_config["id"] = config_id
         self.store.set_push_config(
             task_id,
             config_id,
-            {"pushNotificationConfig": stored_push_config},
+            stored_push_config,
         )
 
     def get_task(self, task_id: str) -> dict:
@@ -320,18 +316,16 @@ class A2AService:
     def create_push_config(self, params: dict) -> dict:
         task_id = _required_string(params, "taskId")
         self.get_task(task_id)
-        push_config = params.get("pushNotificationConfig")
-        if not isinstance(push_config, dict):
-            raise ValueError("pushNotificationConfig is required")
-        if not str(push_config.get("url", "")).strip():
-            raise ValueError("pushNotificationConfig.url is required")
-        config_id = str(push_config.get("id") or uuid4()).strip()
-        stored_push_config = dict(push_config)
+        if not str(params.get("url", "")).strip():
+            raise ValueError("url is required")
+        config_id = str(params.get("id") or uuid4()).strip()
+        stored_push_config = dict(params)
+        stored_push_config["taskId"] = task_id
         stored_push_config["id"] = config_id
         return self.store.set_push_config(
             task_id,
             config_id,
-            {"pushNotificationConfig": stored_push_config},
+            stored_push_config,
         )
 
     def get_push_config(self, params: dict) -> dict:
@@ -406,6 +400,17 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_agent_card(self) -> None:
+        body = json.dumps(self._service.agent_card(), sort_keys=True).encode("utf-8")
+        etag = hashlib.sha256(body).hexdigest()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "public, max-age=300")
+        self.send_header("ETag", f'"{etag}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _send_stream(self, request_id, stream_responses: Iterable[dict]) -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
@@ -420,7 +425,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/.well-known/agent-card.json":
             # Discovery is public so clients can learn the agent's advertised
             # transport and security scheme before making authenticated calls.
-            self._send_json(self._service.agent_card())
+            self._send_agent_card()
             return
 
         if not self._require_auth():

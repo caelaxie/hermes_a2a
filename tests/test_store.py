@@ -47,10 +47,8 @@ class StoreTests(unittest.TestCase):
                 "task-1",
                 "cfg-1",
                 {
-                    "pushNotificationConfig": {
-                        "url": "https://callback.test",
-                        "token": "token",
-                    },
+                    "url": "https://callback.test",
+                    "token": "token",
                 },
             )
             store.set_remote_task("task-1", "https://agent.test", "task-1")
@@ -65,5 +63,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(seq, 1)
         self.assertEqual(events[0]["statusUpdate"]["status"]["state"], "TASK_STATE_WORKING")
         self.assertEqual(push["taskId"], "task-1")
-        self.assertEqual(push["pushNotificationConfig"]["url"], "https://callback.test")
+        self.assertEqual(push["id"], "cfg-1")
+        self.assertEqual(push["url"], "https://callback.test")
+        self.assertEqual(push["token"], "token")
         self.assertEqual(remote["agentUrl"], "https://agent.test")
