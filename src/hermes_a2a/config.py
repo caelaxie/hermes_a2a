@@ -10,6 +10,14 @@ from pathlib import Path
 
 
 DEFAULT_TIMEOUT_SECONDS = 120.0
+HERMES_TOP_LEVEL_CLI_MIN_RELEASE: str | None = None
+HERMES_TOP_LEVEL_CLI_MIN_COMMIT = "308bbf6a5480223ec484b342422fe883e8ac81e4"
+HERMES_TOP_LEVEL_CLI_UPSTREAM_PR = "https://github.com/NousResearch/hermes-agent/pull/13643"
+HERMES_TOP_LEVEL_CLI_STATUS_NOTE = (
+    "No released Hermes tag includes standalone plugin CLI discovery as of "
+    "2026-04-24; use hermes-a2a unless your Hermes build contains the upstream "
+    "plugin CLI wiring commit."
+)
 
 
 def _truthy(value: str) -> bool:
@@ -91,6 +99,17 @@ class A2APluginConfig:
                 "default_timeout_seconds": self.default_timeout_seconds,
                 "hermes_command": self.hermes_command,
                 "hermes_extra_args": list(self.hermes_extra_args),
+            },
+            "hermes_cli": {
+                "top_level_command": "hermes a2a",
+                "fallback_command": "hermes-a2a",
+                "top_level_cli_discovery": {
+                    "state": "unreleased-upstream",
+                    "minimum_release": HERMES_TOP_LEVEL_CLI_MIN_RELEASE,
+                    "minimum_commit": HERMES_TOP_LEVEL_CLI_MIN_COMMIT,
+                    "upstream_pr": HERMES_TOP_LEVEL_CLI_UPSTREAM_PR,
+                    "note": HERMES_TOP_LEVEL_CLI_STATUS_NOTE,
+                },
             },
         }
 

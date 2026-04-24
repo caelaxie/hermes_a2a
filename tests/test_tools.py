@@ -35,6 +35,16 @@ class ToolTests(unittest.TestCase):
         self.assertFalse(payload["config"]["bearer_token_present"])
         self.assertEqual(payload["config"]["default_timeout_seconds"], 120.0)
         self.assertEqual(payload["config"]["remote_agents"], [])
+        self.assertEqual(payload["hermes_cli"]["fallback_command"], "hermes-a2a")
+        self.assertEqual(payload["hermes_cli"]["top_level_command"], "hermes a2a")
+        self.assertEqual(
+            payload["hermes_cli"]["top_level_cli_discovery"]["state"],
+            "unreleased-upstream",
+        )
+        self.assertEqual(
+            payload["hermes_cli"]["top_level_cli_discovery"]["minimum_commit"],
+            "308bbf6a5480223ec484b342422fe883e8ac81e4",
+        )
 
     def test_status_payload_reflects_environment(self) -> None:
         with mock.patch.dict(

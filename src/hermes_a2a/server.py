@@ -18,7 +18,7 @@ from .adapter import (
     HermesExecutionAdapter,
     HermesSubprocessExecutionAdapter,
 )
-from .config import A2APluginConfig, load_config
+from .config import A2APluginConfig, HERMES_TOP_LEVEL_CLI_MIN_COMMIT, load_config
 from .mapping import (
     apply_hermes_event,
     build_agent_card,
@@ -112,7 +112,9 @@ class A2AService:
         payload["message"] = (
             "Hermes A2A bridge is configured. Start the inbound JSON-RPC + SSE "
             "surface with `hermes-a2a serve`. `hermes a2a serve` only works on "
-            "Hermes versions that expose standalone plugin CLI commands."
+            "Hermes builds with standalone plugin CLI discovery; no released "
+            "Hermes tag includes that support yet, so use `hermes-a2a` unless "
+            f"your Hermes build contains {HERMES_TOP_LEVEL_CLI_MIN_COMMIT}."
         )
         return payload
 
