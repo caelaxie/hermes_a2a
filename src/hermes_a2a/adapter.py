@@ -11,7 +11,12 @@ from typing import Iterable
 
 @dataclass(slots=True)
 class HermesEvent:
-    """Structured event emitted by a Hermes execution adapter."""
+    """Hermes-native event before it is translated into A2A task shapes.
+
+    Adapters should stay ignorant of AgentCard, Task, Part, and SSE schemas.
+    `mapping.py` is the single boundary that turns these events into protocol
+    payloads.
+    """
 
     kind: str
     state: str
@@ -23,7 +28,11 @@ class HermesEvent:
 
 
 class HermesExecutionAdapter(ABC):
-    """Stable interface between Hermes internals and A2A protocol surfaces."""
+    """Stable interface between Hermes internals and A2A protocol surfaces.
+
+    The service layer drives task lifecycle decisions; adapter implementations
+    only report runtime progress, artifacts, and terminal metadata.
+    """
 
     @abstractmethod
     def start(
@@ -98,6 +107,8 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
         return f"{text[: self.max_output_chars]}\n[truncated {omitted} chars]"
 
     def _clean_stdout(self, stdout: str) -> str:
+        # Hermes CLI sessions may print bookkeeping lines that are useful for
+        # local shells but should not become user-visible A2A artifacts.
         lines = [line for line in stdout.splitlines() if not line.startswith("session_id:")]
         return self._truncate("\n".join(lines).strip())
 
@@ -224,7 +235,12 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
 
 
 class DemoHermesExecutionAdapter(HermesExecutionAdapter):
-    """Fallback adapter used until a real Hermes runtime is wired in."""
+    """Deterministic adapter for tests and local protocol debugging.
+
+    Keep this adapter predictable: server and tool tests use message text to
+    force status, data, file, and input-required branches without invoking a
+    model or subprocess.
+    """
 
     def _run(
         self,

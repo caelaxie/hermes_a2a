@@ -19,7 +19,11 @@ def resolve_agent_target(
     target: str,
     config: A2APluginConfig,
 ) -> tuple[str, dict[str, str], str]:
-    """Resolve a direct URL or configured alias into a concrete agent target."""
+    """Resolve a direct URL or configured alias into a concrete agent target.
+
+    Direct URLs intentionally receive no preset headers; aliases are the place
+    for persisted per-agent auth metadata from `A2A_REMOTE_AGENTS_JSON`.
+    """
     stripped = target.strip()
     if stripped.startswith("http://") or stripped.startswith("https://"):
         return stripped.rstrip("/"), {}, "direct"
@@ -32,7 +36,11 @@ def resolve_agent_target(
 
 
 class A2AClient:
-    """Small JSON-RPC client for remote A2A agents."""
+    """Small JSON-RPC client for remote A2A agents.
+
+    The Hermes tool layer uses this client for outbound delegation. Keep it
+    protocol-shaped and free of local task-store decisions.
+    """
 
     def __init__(
         self,
@@ -119,6 +127,8 @@ class A2AClient:
                     event_name = line.split(":", 1)[1].strip()
                     continue
                 if line.startswith("data:"):
+                    # The local server emits one JSON object per SSE `data:`
+                    # line, so this parser deliberately stays line-oriented.
                     data = json.loads(line.split(":", 1)[1].strip())
                     yield {"event": event_name, "data": data}
 

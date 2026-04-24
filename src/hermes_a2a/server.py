@@ -48,7 +48,11 @@ def _build_execution_adapter(config: A2APluginConfig) -> HermesExecutionAdapter:
 
 
 class A2AService:
-    """Application service shared by Hermes tools, CLI, and HTTP handlers."""
+    """Application service shared by Hermes tools, CLI, and HTTP handlers.
+
+    This class owns orchestration across config, storage, adapters, and
+    protocol mapping so the HTTP handler remains a thin transport layer.
+    """
 
     def __init__(
         self,
@@ -85,6 +89,9 @@ class A2AService:
         stream: bool,
         metadata: dict | None = None,
     ) -> Iterable:
+        # Existing tasks represent continuation. Streaming still uses the
+        # adapter's streaming method because the transport contract, not task
+        # freshness, decides how updates should be delivered to the caller.
         existing = self.store.get_task(task_id)
         if existing is None:
             return self.adapter.stream(task_id, context_id, message_text, metadata) if stream else self.adapter.start(task_id, context_id, message_text, metadata)
@@ -124,6 +131,8 @@ class A2AService:
             task = build_initial_task(task_id, context_id, message_text, direction="inbound")
         events: list[dict] = []
 
+        # Persist each mapped event before push delivery. If a callback fails,
+        # resubscribe/event replay can still return the durable update.
         for adapter_event in self._iter_adapter_events(
             task_id,
             context_id,
@@ -221,6 +230,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         if parsed.path == "/.well-known/agent-card.json":
+            # Discovery is public so clients can learn the agent's advertised
+            # transport and security scheme before making authenticated calls.
             self._send_json(self._service.agent_card())
             return
 
@@ -267,6 +278,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
             if method == "message/stream":
                 task, events = self._service.send_message(params, stream=True)
+                # This implementation buffers adapter output, then emits a
+                # compact SSE replay plus a final task snapshot for clients.
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")

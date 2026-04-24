@@ -52,6 +52,7 @@ def tool_a2a_list_agents(args: dict[str, Any], **kwargs) -> str:
 
 
 def _refresh_remote_task(service: A2AService, task_id: str) -> dict:
+    """Return the local snapshot, refreshing delegated tasks from their agent."""
     task = service.get_task(task_id)
     remote = service.store.get_remote_task(task_id)
     if not remote:
@@ -127,6 +128,8 @@ def tool_a2a_delegate(args: dict[str, Any], **kwargs) -> str:
         card = client.get_agent_card()
 
         if mode == "stream":
+            # Tool callers receive both the raw remote event stream and the
+            # final task snapshot; the store only persists the final task.
             events = list(client.stream_message(message, task_id=task_id, context_id=context_id))
             final_task = None
             for event in events:
@@ -146,6 +149,8 @@ def tool_a2a_delegate(args: dict[str, Any], **kwargs) -> str:
             {"remoteAgentUrl": agent_url, "resolvedTarget": resolved_target}
         )
         service.store.upsert_task(task, direction="outbound")
+        # Keep a local lookup from tool-facing task ID to the remote agent URL
+        # so later get/cancel calls can be routed back to the same agent.
         service.store.set_remote_task(task["id"], agent_url, task["id"])
         if mode == "poll":
             return json.dumps({"card": card, "task": task, "mode": "poll"})
