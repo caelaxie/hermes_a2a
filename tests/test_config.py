@@ -17,6 +17,12 @@ from hermes_a2a.config import load_config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_load_config_defaults_to_runtime_timeout(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            config = load_config()
+
+        self.assertEqual(config.default_timeout_seconds, 120.0)
+
     def test_load_config_parses_remote_agents_and_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch.dict(
@@ -49,6 +55,7 @@ class ConfigTests(unittest.TestCase):
                 "A2A_EXECUTION_ADAPTER": "hermes",
                 "A2A_HERMES_COMMAND": "/opt/bin/hermes",
                 "A2A_HERMES_EXTRA_ARGS": "--model test-model --provider test-provider",
+                "A2A_DEFAULT_TIMEOUT_SECONDS": "45.5",
             },
             clear=True,
         ):
@@ -60,3 +67,4 @@ class ConfigTests(unittest.TestCase):
             config.hermes_extra_args,
             ["--model", "test-model", "--provider", "test-provider"],
         )
+        self.assertEqual(config.default_timeout_seconds, 45.5)

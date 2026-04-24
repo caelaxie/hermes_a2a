@@ -107,8 +107,13 @@ class HermesSubprocessAdapterTests(unittest.TestCase):
             service = A2AService(config=config)
             try:
                 self.assertIsInstance(service.adapter, HermesSubprocessExecutionAdapter)
+                self.assertEqual(
+                    service.adapter.timeout_seconds,
+                    config.default_timeout_seconds,
+                )
             finally:
                 service.close()
+
     def test_service_rejects_unknown_execution_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = A2APluginConfig(

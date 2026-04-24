@@ -120,6 +120,8 @@ The plugin is configured through environment variables:
 - `A2A_BEARER_TOKEN`
 - `A2A_EXPORTED_SKILLS`
 - `A2A_REMOTE_AGENTS_JSON`
+- `A2A_DEFAULT_TIMEOUT_SECONDS` (`120` by default for Hermes runtime and
+  outbound A2A calls)
 - `A2A_EXECUTION_ADAPTER` (`hermes` by default, set to `demo` for deterministic protocol testing)
 - `A2A_HERMES_COMMAND` (`hermes` by default)
 - `A2A_HERMES_EXTRA_ARGS` (optional shell-style arguments appended to `hermes chat`)
@@ -167,6 +169,9 @@ Example push notification config request:
   `SendStreamingMessage` calls through `hermes chat -q ... --quiet`. Set
   `A2A_EXECUTION_ADAPTER=demo` to use the deterministic demo adapter for
   protocol testing without invoking a model.
+- The default runtime timeout is 120 seconds. Override it with
+  `A2A_DEFAULT_TIMEOUT_SECONDS` when a deployment needs shorter or longer model
+  execution and remote-agent request windows.
 - The Hermes subprocess adapter is synchronous: streaming endpoints emit A2A
   JSON-RPC SSE `data:` frames after the underlying Hermes CLI call returns.
 - The SQLite store is durable by default and keeps official A2A task snapshots,
