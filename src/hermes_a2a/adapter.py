@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
+import threading
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -97,8 +101,11 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
         self.command = command or "hermes"
         self.timeout_seconds = timeout_seconds
         self.extra_args = list(extra_args or [])
-        self.runner = runner or subprocess.run
+        self.runner = runner
         self.max_output_chars = max(1, int(max_output_chars))
+        self._process_lock = threading.Lock()
+        self._active_processes: dict[str, subprocess.Popen | None] = {}
+        self._cancel_requested: set[str] = set()
 
     def _truncate(self, text: str) -> str:
         if len(text) <= self.max_output_chars:
@@ -112,20 +119,166 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
         lines = [line for line in stdout.splitlines() if not line.startswith("session_id:")]
         return self._truncate("\n".join(lines).strip())
 
-    def _run(self, task_id: str, context_id: str, message: str) -> Iterable[HermesEvent]:
-        yield HermesEvent(
-            kind="status",
-            state="working",
-            message="Hermes runtime execution started",
-            metadata={"task_id": task_id, "context_id": context_id},
-        )
-        command = [self.command, "chat", "--quiet", *self.extra_args, "-q", message]
+    def _reserve_process_slot(self, task_id: str) -> None:
+        with self._process_lock:
+            self._cancel_requested.discard(task_id)
+            self._active_processes[task_id] = None
+
+    def _register_process(self, task_id: str, process: subprocess.Popen) -> bool:
+        with self._process_lock:
+            if task_id in self._cancel_requested:
+                return False
+            self._active_processes[task_id] = process
+            return True
+
+    def _clear_process_slot(self, task_id: str) -> None:
+        with self._process_lock:
+            self._active_processes.pop(task_id, None)
+            self._cancel_requested.discard(task_id)
+
+    def _is_cancel_requested(self, task_id: str) -> bool:
+        with self._process_lock:
+            return task_id in self._cancel_requested
+
+    def _request_cancel(self, task_id: str) -> subprocess.Popen | None:
+        with self._process_lock:
+            if task_id not in self._active_processes:
+                return None
+            self._cancel_requested.add(task_id)
+            return self._active_processes[task_id]
+
+    def _terminate_process(self, process: subprocess.Popen) -> None:
         try:
-            completed = self.runner(
+            if os.name != "nt":
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
+        except ProcessLookupError:
+            return
+        except OSError:
+            try:
+                process.terminate()
+            except OSError:
+                return
+
+    def _kill_process(self, process: subprocess.Popen) -> None:
+        try:
+            if os.name != "nt":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            return
+        except OSError:
+            try:
+                process.kill()
+            except OSError:
+                return
+
+    def _stop_process(self, process: subprocess.Popen) -> None:
+        self._terminate_process(process)
+        try:
+            process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            self._kill_process(process)
+            process.communicate()
+
+    def _run_with_process_tracking(
+        self,
+        task_id: str,
+        command: list[str],
+    ) -> subprocess.CompletedProcess | None:
+        popen_kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+        }
+        if os.name != "nt":
+            popen_kwargs["start_new_session"] = True
+        process = subprocess.Popen(command, **popen_kwargs)
+        if not self._register_process(task_id, process):
+            self._stop_process(process)
+            return None
+
+        deadline = time.monotonic() + self.timeout_seconds
+        while True:
+            if self._is_cancel_requested(task_id):
+                self._stop_process(process)
+                return None
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._stop_process(process)
+                raise subprocess.TimeoutExpired(command, self.timeout_seconds)
+
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+            except subprocess.TimeoutExpired:
+                continue
+            if self._is_cancel_requested(task_id):
+                return None
+            return subprocess.CompletedProcess(
                 command,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
+                process.returncode,
+                stdout,
+                stderr,
+            )
+
+    def _run(self, task_id: str, context_id: str, message: str) -> Iterable[HermesEvent]:
+        command = [self.command, "chat", "--quiet", *self.extra_args, "-q", message]
+        self._reserve_process_slot(task_id)
+        try:
+            yield HermesEvent(
+                kind="status",
+                state="working",
+                message="Hermes runtime execution started",
+                metadata={"task_id": task_id, "context_id": context_id},
+            )
+            if self._is_cancel_requested(task_id):
+                return
+            if self.runner is not None:
+                completed = self.runner(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_seconds,
+                )
+            else:
+                completed = self._run_with_process_tracking(task_id, command)
+                if completed is None:
+                    return
+            if self._is_cancel_requested(task_id):
+                return
+
+            stdout = self._clean_stdout(completed.stdout or "")
+            if completed.returncode != 0:
+                yield HermesEvent(
+                    kind="status",
+                    state="failed",
+                    message="Hermes runtime failed",
+                    metadata={
+                        "task_id": task_id,
+                        "context_id": context_id,
+                        "exit_code": str(completed.returncode),
+                    },
+                )
+                return
+
+            if stdout:
+                yield HermesEvent(
+                    kind="artifact",
+                    state="working",
+                    message="Hermes runtime response emitted",
+                    text=stdout,
+                    metadata={"artifact_id": "hermes-response"},
+                )
+            if self._is_cancel_requested(task_id):
+                return
+            yield HermesEvent(
+                kind="status",
+                state="completed",
+                message="Hermes runtime execution completed",
+                metadata={"task_id": task_id, "context_id": context_id},
             )
         except subprocess.TimeoutExpired:
             yield HermesEvent(
@@ -143,35 +296,8 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
                 metadata={"task_id": task_id, "context_id": context_id},
             )
             return
-
-        stdout = self._clean_stdout(completed.stdout or "")
-        if completed.returncode != 0:
-            yield HermesEvent(
-                kind="status",
-                state="failed",
-                message="Hermes runtime failed",
-                metadata={
-                    "task_id": task_id,
-                    "context_id": context_id,
-                    "exit_code": str(completed.returncode),
-                },
-            )
-            return
-
-        if stdout:
-            yield HermesEvent(
-                kind="artifact",
-                state="working",
-                message="Hermes runtime response emitted",
-                text=stdout,
-                metadata={"artifact_id": "hermes-response"},
-            )
-        yield HermesEvent(
-            kind="status",
-            state="completed",
-            message="Hermes runtime execution completed",
-            metadata={"task_id": task_id, "context_id": context_id},
-        )
+        finally:
+            self._clear_process_slot(task_id)
 
     def start(
         self,
@@ -210,6 +336,9 @@ class HermesSubprocessExecutionAdapter(HermesExecutionAdapter):
         metadata: dict | None = None,
     ) -> Iterable[HermesEvent]:
         del metadata
+        process = self._request_cancel(task_id)
+        if process is not None:
+            self._terminate_process(process)
         return [
             HermesEvent(
                 kind="status",
