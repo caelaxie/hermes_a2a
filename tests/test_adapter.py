@@ -177,6 +177,58 @@ class HermesSubprocessAdapterTests(unittest.TestCase):
             self.assertTrue(canceled_promptly)
             self.assertNotIn("completed", [event.state for event in events])
 
+    def test_stream_emits_stdout_chunk_before_subprocess_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            started_marker = tmp_path / "chunk-written"
+            done_marker = tmp_path / "process-done"
+            fake_hermes = tmp_path / "fake-hermes"
+            fake_hermes.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import pathlib",
+                        "import sys",
+                        "import time",
+                        f"started = pathlib.Path({str(started_marker)!r})",
+                        f"done = pathlib.Path({str(done_marker)!r})",
+                        "sys.stdout.write('first chunk\\n')",
+                        "sys.stdout.flush()",
+                        "started.touch()",
+                        "time.sleep(0.5)",
+                        "sys.stdout.write('second chunk\\n')",
+                        "sys.stdout.flush()",
+                        "done.touch()",
+                    ]
+                )
+            )
+            fake_hermes.chmod(0o755)
+            adapter = HermesSubprocessExecutionAdapter(
+                command=str(fake_hermes),
+                timeout_seconds=2,
+            )
+
+            events = adapter.stream("task-stream", "ctx-1", "hello")
+            first_event = next(events)
+            self.assertEqual(first_event.state, "working")
+            first_artifact = next(events)
+
+            self.assertEqual(first_artifact.kind, "artifact")
+            self.assertEqual(first_artifact.text, "first chunk\n")
+            self.assertEqual(first_artifact.metadata["append"], "false")
+            self.assertEqual(first_artifact.metadata["last_chunk"], "false")
+            self.assertTrue(started_marker.exists())
+            self.assertFalse(done_marker.exists())
+
+            remaining_events = list(events)
+
+            self.assertTrue(done_marker.exists())
+            remaining_artifacts = [
+                event for event in remaining_events if event.kind == "artifact"
+            ]
+            self.assertTrue(remaining_artifacts)
+            self.assertIn("completed", [event.state for event in remaining_events])
+
     def test_service_uses_hermes_adapter_when_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = A2APluginConfig(

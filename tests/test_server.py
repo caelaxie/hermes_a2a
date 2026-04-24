@@ -329,8 +329,14 @@ class ServerTests(unittest.TestCase):
             "https://github.com/caelaxie/hermes_a2a/extensions/runtime-streaming",
         )
         self.assertFalse(streaming_extensions[0]["required"])
-        self.assertIn("task-level progress", streaming_extensions[0]["description"])
-        self.assertIn("not token-", streaming_extensions[0]["description"])
+        self.assertIn(
+            "incremental Hermes subprocess stdout",
+            streaming_extensions[0]["description"],
+        )
+        self.assertIn(
+            "falls back to final CLI output",
+            streaming_extensions[0]["description"],
+        )
         self.assertEqual(card["skills"][0]["inputModes"], ["text/plain", "application/json"])
         self.assertEqual(cache_control, "public, max-age=300")
         self.assertTrue(etag)
