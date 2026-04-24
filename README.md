@@ -85,8 +85,11 @@ uv run hermes-a2a card
 
 - Inbound server:
   - `GET /.well-known/agent-card.json`
-  - `POST /rpc` for `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`,
-    `tasks/resubscribe`, and push notification config methods
+  - `POST /rpc` for the official A2A 1.0 JSON-RPC methods:
+    `SendMessage`, `SendStreamingMessage`, `GetTask`, `ListTasks`,
+    `CancelTask`, `SubscribeToTask`, `CreateTaskPushNotificationConfig`,
+    `GetTaskPushNotificationConfig`, `ListTaskPushNotificationConfig`,
+    `DeleteTaskPushNotificationConfig`, and `GetExtendedAgentCard`
 - Outbound Hermes tools:
   - `a2a_status`
   - `a2a_list_agents`
@@ -132,6 +135,15 @@ The plugin is configured through environment variables:
 
 ## Notes
 
-- By default the inbound server routes A2A `message/send` and `message/stream` calls through `hermes chat -q ... --quiet`. Set `A2A_EXECUTION_ADAPTER=demo` to use the deterministic demo adapter for protocol testing without invoking a model.
-- The Hermes subprocess adapter is synchronous: streaming endpoints emit A2A SSE events after the underlying Hermes CLI call returns.
-- The SQLite store is durable by default and keeps task snapshots, event history, remote delegation tracking, and inbound push notification config state.
+- JSON-RPC requests must include `A2A-Version: 1.0`. Legacy slash-style methods
+  such as `message/send` and old task/message/part response fields are not
+  supported.
+- By default the inbound server routes A2A `SendMessage` and
+  `SendStreamingMessage` calls through `hermes chat -q ... --quiet`. Set
+  `A2A_EXECUTION_ADAPTER=demo` to use the deterministic demo adapter for
+  protocol testing without invoking a model.
+- The Hermes subprocess adapter is synchronous: streaming endpoints emit A2A
+  JSON-RPC SSE `data:` frames after the underlying Hermes CLI call returns.
+- The SQLite store is durable by default and keeps official A2A task snapshots,
+  StreamResponse event payloads, remote delegation tracking, and named inbound
+  push notification config state.

@@ -132,9 +132,9 @@ def tool_a2a_delegate(args: dict[str, Any], **kwargs) -> str:
             # final task snapshot; the store only persists the final task.
             events = list(client.stream_message(message, task_id=task_id, context_id=context_id))
             final_task = None
-            for event in events:
-                if event["event"] == "task":
-                    final_task = event["data"]
+            for stream_response in events:
+                if "task" in stream_response:
+                    final_task = stream_response["task"]
             if final_task is None:
                 raise A2AClientError("Remote stream did not yield a final task snapshot")
             final_task.setdefault("metadata", {}).update(
