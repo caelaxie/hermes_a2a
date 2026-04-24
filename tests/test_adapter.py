@@ -15,7 +15,11 @@ sys_path = str(ROOT / "src")
 if sys_path not in os.sys.path:
     os.sys.path.insert(0, sys_path)
 
-from hermes_a2a.adapter import HermesSubprocessExecutionAdapter
+from hermes_a2a.adapter import (
+    HermesEvent,
+    HermesExecutionAdapter,
+    HermesSubprocessExecutionAdapter,
+)
 from hermes_a2a.config import A2APluginConfig
 from hermes_a2a.server import A2AService
 
@@ -46,6 +50,38 @@ class HermesSubprocessAdapterTests(unittest.TestCase):
         self.assertEqual(events[1].text, "Hermes says hello")
         self.assertEqual(events[1].metadata["artifact_id"], "hermes-response")
         self.assertEqual(events[-1].state, "completed")
+        self.assertEqual(events[-1].metadata["hermes_session_id"], "abc123")
+
+    def test_continue_task_resumes_stored_hermes_session(self) -> None:
+        completed = mock.Mock(returncode=0, stdout="continued\n", stderr="")
+        adapter = HermesSubprocessExecutionAdapter(
+            command="hermes",
+            runner=mock.Mock(return_value=completed),
+        )
+
+        list(
+            adapter.continue_task(
+                "task-1",
+                "ctx-1",
+                "follow up",
+                metadata={"hermes_session_id": "20260424_101500_abc123"},
+            )
+        )
+
+        adapter.runner.assert_called_once_with(
+            [
+                "hermes",
+                "chat",
+                "--quiet",
+                "--resume",
+                "20260424_101500_abc123",
+                "-q",
+                "follow up",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120.0,
+        )
 
     def test_start_emits_sanitized_failed_status_when_hermes_command_fails(self) -> None:
         completed = mock.Mock(returncode=2, stdout="", stderr="boom with /secret/path")
@@ -118,6 +154,77 @@ class HermesSubprocessAdapterTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "Unsupported A2A_EXECUTION_ADAPTER"):
                 A2AService(config=config)
+
+    def test_service_persists_and_reuses_hermes_session_for_task_continuation(self) -> None:
+        class RecordingAdapter(HermesExecutionAdapter):
+            def __init__(self) -> None:
+                self.continue_metadata = None
+
+            def start(self, task_id, context_id, message, metadata=None):
+                del message, metadata
+                return [
+                    HermesEvent(
+                        kind="status",
+                        state="completed",
+                        message="done",
+                        metadata={
+                            "task_id": task_id,
+                            "context_id": context_id,
+                            "hermes_session_id": "20260424_101500_abc123",
+                        },
+                    )
+                ]
+
+            def continue_task(self, task_id, context_id, message, metadata=None):
+                del task_id, context_id, message
+                self.continue_metadata = metadata
+                return [
+                    HermesEvent(kind="status", state="completed", message="continued")
+                ]
+
+            def stream(self, task_id, context_id, message, metadata=None):
+                return self.continue_task(task_id, context_id, message, metadata)
+
+            def cancel(self, task_id, context_id, metadata=None):
+                del task_id, context_id, metadata
+                return []
+
+            def finalize_task(self, task_id, context_id, metadata=None):
+                del task_id, context_id
+                return {"adapter": "recording", "metadata": metadata or {}}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = A2APluginConfig(store_path=str(Path(tmpdir) / "state.db"))
+            adapter = RecordingAdapter()
+            service = A2AService(config=config, adapter=adapter)
+            try:
+                task, _ = service.send_message(
+                    {
+                        "message": {
+                            "messageId": "msg-1",
+                            "role": "ROLE_USER",
+                            "parts": [{"text": "hello"}],
+                        }
+                    }
+                )
+                service.send_message(
+                    {
+                        "message": {
+                            "messageId": "msg-2",
+                            "role": "ROLE_USER",
+                            "taskId": task["id"],
+                            "contextId": task["contextId"],
+                            "parts": [{"text": "follow up"}],
+                        }
+                    }
+                )
+            finally:
+                service.close()
+
+        self.assertEqual(
+            adapter.continue_metadata["hermes_session_id"],
+            "20260424_101500_abc123",
+        )
 
 
 if __name__ == "__main__":

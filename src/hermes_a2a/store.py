@@ -68,6 +68,17 @@ class SQLiteTaskStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS hermes_sessions (
+                    task_id TEXT PRIMARY KEY,
+                    context_id TEXT NOT NULL,
+                    hermes_session_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_hermes_sessions_context_id
+                    ON hermes_sessions (context_id, updated_at DESC);
                 """
             )
 
@@ -228,6 +239,55 @@ class SQLiteTaskStore:
             "taskId": row["task_id"],
             "agentUrl": row["agent_url"],
             "remoteTaskId": row["remote_task_id"],
+        }
+
+    def set_hermes_session(
+        self,
+        task_id: str,
+        context_id: str,
+        hermes_session_id: str,
+    ) -> None:
+        now = utc_timestamp()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO hermes_sessions
+                    (task_id, context_id, hermes_session_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    context_id = excluded.context_id,
+                    hermes_session_id = excluded.hermes_session_id,
+                    updated_at = excluded.updated_at
+                """,
+                (task_id, context_id, hermes_session_id, now, now),
+            )
+
+    def get_hermes_session(self, task_id: str, context_id: str = "") -> dict | None:
+        row = self._conn.execute(
+            """
+            SELECT task_id, context_id, hermes_session_id
+            FROM hermes_sessions
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        if row is None and context_id:
+            row = self._conn.execute(
+                """
+                SELECT task_id, context_id, hermes_session_id
+                FROM hermes_sessions
+                WHERE context_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (context_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "taskId": row["task_id"],
+            "contextId": row["context_id"],
+            "hermesSessionId": row["hermes_session_id"],
         }
 
     def close(self) -> None:
