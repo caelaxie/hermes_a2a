@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -132,6 +133,49 @@ class HermesSubprocessAdapterTests(unittest.TestCase):
         events = list(adapter.start("task-1", "ctx-1", "hello"))
 
         self.assertEqual(events[1].text, "abc\n[truncated 3 chars]")
+
+    def test_cancel_terminates_active_hermes_subprocess(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_hermes = Path(tmpdir) / "fake-hermes"
+            fake_hermes.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import time",
+                        "time.sleep(30)",
+                    ]
+                )
+            )
+            fake_hermes.chmod(0o755)
+            adapter = HermesSubprocessExecutionAdapter(
+                command=str(fake_hermes),
+                timeout_seconds=1,
+            )
+            events = []
+
+            def run_adapter() -> None:
+                for event in adapter.start("task-cancel", "ctx-1", "hello"):
+                    events.append(event)
+
+            thread = threading.Thread(target=run_adapter)
+            thread.start()
+            try:
+                for _ in range(100):
+                    if events and events[0].state == "working":
+                        break
+                    thread.join(0.01)
+                self.assertEqual(events[0].state, "working")
+
+                cancel_events = list(adapter.cancel("task-cancel", "ctx-1"))
+
+                self.assertEqual(cancel_events[-1].state, "canceled")
+                thread.join(0.5)
+                canceled_promptly = not thread.is_alive()
+            finally:
+                thread.join(2)
+
+            self.assertTrue(canceled_promptly)
+            self.assertNotIn("completed", [event.state for event in events])
 
     def test_service_uses_hermes_adapter_when_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
