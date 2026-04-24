@@ -6,6 +6,7 @@ import io
 import json
 import sys
 import unittest
+from argparse import ArgumentParser
 from argparse import Namespace
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -40,6 +41,15 @@ class CliEntrypointTests(unittest.TestCase):
             stdout.getvalue().strip(),
             "Usage: hermes-a2a {status|card|serve|agents list|task get|task cancel}",
         )
+
+    def test_register_cli_exposes_same_parser_tree_for_hermes_core(self) -> None:
+        parser = ArgumentParser(prog="hermes a2a")
+
+        cli.register_cli(parser)
+        args = parser.parse_args(["status"])
+
+        self.assertEqual(args.a2a_command, "status")
+        self.assertIs(args.func, cli.handle_cli)
 
 
 if __name__ == "__main__":

@@ -112,6 +112,11 @@ def setup_argparse(subparser) -> None:
     subparser.set_defaults(func=handle_cli)
 
 
+def register_cli(subparser) -> None:
+    """Convention-based Hermes CLI hook for directory plugin scanners."""
+    setup_argparse(subparser)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the standalone ``hermes-a2a`` argument parser."""
     parser = argparse.ArgumentParser(

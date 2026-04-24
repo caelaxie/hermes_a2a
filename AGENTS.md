@@ -7,7 +7,7 @@ This repository is the `a2a` Hermes plugin. It supports two load paths:
 - packaged plugin entry point: `hermes_a2a` from `pyproject.toml`
 - standalone console script: `hermes-a2a` from `src/hermes_a2a/cli.py`
 - directory plugin compatibility from the repo root shims: `__init__.py`,
-  `schemas.py`, and `tools.py`
+  `cli.py`, `schemas.py`, and `tools.py`
 
 Keep real implementation under `src/hermes_a2a/`. Root-level files should stay
 thin compatibility shims unless the Hermes directory-plugin contract requires
