@@ -142,7 +142,27 @@ The plugin is configured through environment variables:
 
 - JSON-RPC requests must include `A2A-Version: 1.0`. Legacy slash-style methods
   such as `message/send` and old task/message/part response fields are not
-  supported.
+  supported. A missing version header is rejected because this server only
+  advertises A2A 1.0 in its AgentCard `supportedInterfaces`.
+- The official Python SDK `ClientFactory` path sets the A2A version header on
+  its HTTP client. Prefer that path for SDK clients:
+
+  ```python
+  from a2a.client import ClientConfig, ClientFactory
+
+  factory = ClientFactory(ClientConfig(streaming=False))
+  client = await factory.create_from_url("http://127.0.0.1:9999")
+  ```
+
+  If you build raw HTTP requests or instantiate lower-level SDK transports
+  directly, set the header yourself:
+
+  ```python
+  headers = {
+      "Content-Type": "application/json",
+      "A2A-Version": "1.0",
+  }
+  ```
 - Task RPCs use direct task IDs in params such as `{"id": "task-id"}`. Push
   notification config RPCs use the flat A2A 1.0 `TaskPushNotificationConfig`
   shape with `taskId`, config `id`, `url`, optional `token`, and optional

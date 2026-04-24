@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
@@ -499,6 +500,47 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(unsupported_version["error"]["code"], ERROR_VERSION_NOT_SUPPORTED)
         self.assertEqual(legacy["error"]["code"], ERROR_METHOD_NOT_FOUND)
         self.assertEqual(extended["error"]["code"], ERROR_UNSUPPORTED_OPERATION)
+
+    def test_official_sdk_jsonrpc_client_sends_required_version_header(self) -> None:
+        try:
+            import httpx
+            from a2a.client import ClientConfig, ClientFactory
+            from a2a.types.a2a_pb2 import (
+                Message,
+                Part,
+                ROLE_USER,
+                SendMessageRequest,
+                TASK_STATE_COMPLETED,
+            )
+        except ImportError as exc:
+            self.skipTest(f"optional a2a-sdk extra is not installed: {exc}")
+
+        async def run_sdk_request() -> int:
+            http_client = httpx.AsyncClient(trust_env=False)
+            client = await ClientFactory(
+                ClientConfig(streaming=False, httpx_client=http_client)
+            ).create_from_url(
+                self.server.base_url,
+                resolver_http_kwargs={"follow_redirects": False},
+            )
+            try:
+                request = SendMessageRequest(
+                    message=Message(
+                        message_id=str(uuid4()),
+                        role=ROLE_USER,
+                        parts=[Part(text="hello from sdk")],
+                    )
+                )
+                events = [event async for event in client.send_message(request)]
+            finally:
+                await client.close()
+            self.assertEqual(len(events), 1)
+            self.assertTrue(events[0].HasField("task"))
+            return events[0].task.status.state
+
+        state = asyncio.run(run_sdk_request())
+
+        self.assertEqual(state, TASK_STATE_COMPLETED)
 
     def test_outbound_delegate_round_trips_against_local_server(self) -> None:
         env = {
