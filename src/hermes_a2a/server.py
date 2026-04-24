@@ -9,7 +9,7 @@ from functools import partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterable
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from .adapter import (
@@ -24,12 +24,43 @@ from .mapping import (
     build_initial_task,
     extract_text_from_message,
     make_sse_payload,
+    trim_task_for_response,
+)
+from .protocol import (
+    A2A_CONTENT_TYPE,
+    A2AProtocolError,
+    ERROR_INTERNAL,
+    ERROR_INVALID_PARAMS,
+    ERROR_METHOD_NOT_FOUND,
+    ERROR_PARSE,
+    ERROR_TASK_NOT_FOUND,
+    ERROR_UNSUPPORTED_OPERATION,
+    ERROR_VERSION_NOT_SUPPORTED,
+    METHOD_CANCEL_TASK,
+    METHOD_CREATE_PUSH_CONFIG,
+    METHOD_DELETE_PUSH_CONFIG,
+    METHOD_GET_EXTENDED_AGENT_CARD,
+    METHOD_GET_PUSH_CONFIG,
+    METHOD_GET_TASK,
+    METHOD_LIST_PUSH_CONFIGS,
+    METHOD_LIST_TASKS,
+    METHOD_SEND_MESSAGE,
+    METHOD_SEND_STREAMING_MESSAGE,
+    METHOD_SUBSCRIBE_TO_TASK,
+    PROTOCOL_VERSION,
+    TERMINAL_TASK_STATES,
+    decode_page_token,
+    decode_task_page_token,
+    encode_page_token,
+    encode_task_page_token,
+    jsonrpc_error,
+    jsonrpc_success,
+    parse_push_config_name,
+    parse_rfc3339_timestamp,
+    parse_task_name,
+    push_config_name,
 )
 from .store import SQLiteTaskStore
-
-
-def _jsonrpc_error(request_id, code: int, message: str) -> dict:
-    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
 def _build_execution_adapter(config: A2APluginConfig) -> HermesExecutionAdapter:
@@ -97,38 +128,59 @@ class A2AService:
             return self.adapter.stream(task_id, context_id, message_text, metadata) if stream else self.adapter.start(task_id, context_id, message_text, metadata)
         return self.adapter.stream(task_id, context_id, message_text, metadata) if stream else self.adapter.continue_task(task_id, context_id, message_text, metadata)
 
-    def _notify_push(self, task_id: str, event_name: str, data: dict) -> None:
-        config = self.store.get_push_config(task_id)
-        if not config:
-            return
-        push_config = config["pushNotificationConfig"]
-        payload = json.dumps({"event": event_name, "data": data}).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
-        token = push_config.get("token", "")
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        request = urllib.request.Request(
-            push_config["url"],
-            data=payload,
-            headers=headers,
-        )
-        try:
-            urllib.request.urlopen(request, timeout=self.config.default_timeout_seconds).read()
-        except Exception:
-            # Push delivery is best-effort. The event remains durable in SQLite.
-            return
+    def _notify_push(self, task_id: str, stream_response: dict) -> None:
+        for config in self.store.list_push_configs_for_task(task_id):
+            push_config = config["pushNotificationConfig"]
+            payload = json.dumps(stream_response, sort_keys=True).encode("utf-8")
+            headers = {"Content-Type": A2A_CONTENT_TYPE}
+            auth = push_config.get("authentication") or {}
+            schemes = [str(scheme).lower() for scheme in auth.get("schemes", [])]
+            credentials = str(auth.get("credentials", "")).strip()
+            if credentials and "bearer" in schemes:
+                headers["Authorization"] = f"Bearer {credentials}"
+            elif credentials and schemes:
+                headers["Authorization"] = f"{schemes[0]} {credentials}"
+            request = urllib.request.Request(
+                push_config["url"],
+                data=payload,
+                headers=headers,
+            )
+            try:
+                urllib.request.urlopen(request, timeout=self.config.default_timeout_seconds).read()
+            except Exception:
+                # Push delivery is best-effort. The event remains durable in SQLite.
+                continue
 
     def send_message(
         self,
         params: dict,
         stream: bool = False,
     ) -> tuple[dict, list[dict]]:
-        task_id = str(params.get("taskId") or uuid4())
-        context_id = str(params.get("contextId") or task_id)
-        message_text = extract_text_from_message(params.get("message"))
+        message = params.get("message")
+        message_text = extract_text_from_message(message)
+        if not isinstance(message, dict):
+            raise ValueError("SendMessageRequest.message is required")
+        if not message.get("messageId"):
+            raise ValueError("Message.messageId is required")
+        if message.get("role") != "ROLE_USER":
+            raise ValueError("Message.role must be ROLE_USER")
+        task_id = str(message.get("taskId") or uuid4())
         task = self.store.get_task(task_id)
+        context_id = str(
+            task.get("contextId")
+            if task is not None
+            else message.get("contextId") or task_id
+        )
+        if message.get("contextId") and str(message["contextId"]) != context_id:
+            raise ValueError("Message.contextId must match the task context")
+        message = dict(message)
+        message["taskId"] = task_id
+        message["contextId"] = context_id
         if task is None:
-            task = build_initial_task(task_id, context_id, message_text, direction="inbound")
+            task = build_initial_task(task_id, context_id, message, direction="inbound")
+        else:
+            task.setdefault("history", []).append(message)
+        self._configure_push_from_send_message(task_id, params.get("configuration") or {})
         events: list[dict] = []
 
         # Persist each mapped event before push delivery. If a callback fails,
@@ -140,15 +192,42 @@ class A2AService:
             stream=stream,
             metadata={"mode": "stream" if stream else "send"},
         ):
-            envelope = apply_hermes_event(task, adapter_event)
-            seq = self.store.append_event(task_id, envelope["event"], envelope["data"])
-            envelope["data"]["sequence"] = seq
-            events.append(envelope)
-            self._notify_push(task_id, envelope["event"], envelope["data"])
+            stream_response = apply_hermes_event(task, adapter_event)
+            self.store.append_event(task_id, stream_response)
+            events.append(stream_response)
+            self._notify_push(task_id, stream_response)
 
-        task.setdefault("metadata", {}).update(self.adapter.finalize_task(task_id, context_id))
+        adapter_metadata = self.adapter.finalize_task(task_id, context_id)
+        task.setdefault("metadata", {}).update(
+            {
+                "adapter": adapter_metadata.get("adapter", "unknown"),
+                "adapterMetadata": adapter_metadata.get("metadata", {}),
+            }
+        )
         self.store.upsert_task(task, direction="inbound")
         return task, events
+
+    def _configure_push_from_send_message(self, task_id: str, configuration: dict) -> None:
+        if not isinstance(configuration, dict):
+            raise ValueError("SendMessageRequest.configuration must be an object")
+        push_config = configuration.get("pushNotificationConfig")
+        if push_config is None:
+            return
+        if not isinstance(push_config, dict):
+            raise ValueError("configuration.pushNotificationConfig must be an object")
+        if not str(push_config.get("url", "")).strip():
+            raise ValueError("pushNotificationConfig.url is required")
+        config_id = str(push_config.get("id") or uuid4()).strip()
+        stored_push_config = dict(push_config)
+        stored_push_config["id"] = config_id
+        self.store.set_push_config(
+            task_id,
+            config_id,
+            {
+                "name": push_config_name(task_id, config_id),
+                "pushNotificationConfig": stored_push_config,
+            },
+        )
 
     def get_task(self, task_id: str) -> dict:
         task = self.store.get_task(task_id)
@@ -160,41 +239,135 @@ class A2AService:
         task = self.get_task(task_id)
         context_id = task.get("contextId", task_id)
         for adapter_event in self.adapter.cancel(task_id, context_id):
-            envelope = apply_hermes_event(task, adapter_event)
-            seq = self.store.append_event(task_id, envelope["event"], envelope["data"])
-            envelope["data"]["sequence"] = seq
-            self._notify_push(task_id, envelope["event"], envelope["data"])
-        self.store.upsert_task(task, direction=task.get("direction", "inbound"))
+            stream_response = apply_hermes_event(task, adapter_event)
+            self.store.append_event(task_id, stream_response)
+            self._notify_push(task_id, stream_response)
+        self.store.upsert_task(task, direction="inbound")
         return task
 
-    def resubscribe(self, task_id: str, after_seq: int = 0) -> list[dict]:
-        return self.store.list_events(task_id, after_seq=after_seq)
+    def subscribe_task(self, task_id: str) -> list[dict]:
+        task = self.get_task(task_id)
+        state = task.get("status", {}).get("state", "")
+        if state in TERMINAL_TASK_STATES:
+            raise A2AProtocolError(
+                ERROR_UNSUPPORTED_OPERATION,
+                "SubscribeToTask is not supported for terminal tasks",
+            )
+        return [{"task": task}, *self.store.list_events(task_id)]
 
-    def set_push_config(self, params: dict) -> dict:
-        task_id = str(params.get("id") or params.get("taskId") or "").strip()
-        if not task_id:
-            raise ValueError("Missing task id")
-        config = params.get("pushNotificationConfig") or {}
-        url = str(config.get("url", "")).strip()
-        token = str(config.get("token", "")).strip()
-        if not url:
-            raise ValueError("Missing push notification url")
-        return self.store.set_push_config(task_id, url, token)
+    def list_tasks(self, params: dict) -> dict:
+        page_size = int(params.get("pageSize") or 50)
+        if page_size < 1 or page_size > 100:
+            raise ValueError("pageSize must be between 1 and 100")
+        cursor = decode_task_page_token(str(params.get("pageToken") or ""))
+        context_id = str(params.get("contextId") or "")
+        status = str(params.get("status") or "")
+        status_after = params.get("statusTimestampAfter")
+        history_length = params.get("historyLength")
+        history_limit = int(history_length) if history_length is not None else None
+        include_artifacts = bool(params.get("includeArtifacts", False))
+        tasks = self.store.list_tasks()
+        if context_id:
+            tasks = [task for task in tasks if task.get("contextId") == context_id]
+        if status:
+            tasks = [task for task in tasks if task.get("status", {}).get("state") == status]
+        if status_after:
+            status_after_time = parse_rfc3339_timestamp(str(status_after))
+            tasks = [
+                task
+                for task in tasks
+                if parse_rfc3339_timestamp(str(task.get("status", {}).get("timestamp", "")))
+                >= status_after_time
+            ]
+        tasks.sort(
+            key=lambda task: (
+                str(task.get("status", {}).get("timestamp", "")),
+                str(task.get("id", "")),
+            ),
+            reverse=True,
+        )
+        total_size = len(tasks)
+        if cursor:
+            cursor_key = (cursor["statusTimestamp"], cursor["id"])
+            tasks = [
+                task
+                for task in tasks
+                if (
+                    str(task.get("status", {}).get("timestamp", "")),
+                    str(task.get("id", "")),
+                )
+                < cursor_key
+            ]
+        page = tasks[:page_size]
+        return {
+            "tasks": [
+                trim_task_for_response(task, history_limit, include_artifacts=include_artifacts)
+                for task in page
+            ],
+            "nextPageToken": encode_task_page_token(page[-1]) if len(tasks) > page_size else "",
+            "pageSize": page_size,
+            "totalSize": total_size,
+        }
 
-    def get_push_config(self, params: dict) -> dict | None:
-        task_id = str(params.get("id") or params.get("taskId") or "").strip()
-        if not task_id:
-            raise ValueError("Missing task id")
-        return self.store.get_push_config(task_id)
+    def create_push_config(self, params: dict) -> dict:
+        task_id = parse_task_name(str(params.get("parent") or ""))
+        self.get_task(task_id)
+        config_id = str(params.get("configId") or "").strip()
+        if not config_id:
+            raise ValueError("configId is required")
+        config = params.get("config") or {}
+        push_config = config.get("pushNotificationConfig") if isinstance(config, dict) else None
+        if not isinstance(push_config, dict):
+            raise ValueError("config.pushNotificationConfig is required")
+        if not str(push_config.get("url", "")).strip():
+            raise ValueError("pushNotificationConfig.url is required")
+        return self.store.set_push_config(
+            task_id,
+            config_id,
+            {
+                "name": push_config_name(task_id, config_id),
+                "pushNotificationConfig": push_config,
+            },
+        )
 
-    def list_push_configs(self) -> list[dict]:
-        return self.store.list_push_configs()
+    def get_push_config(self, params: dict) -> dict:
+        name = str(params.get("name") or "")
+        parse_push_config_name(name)
+        result = self.store.get_push_config(name)
+        if result is None:
+            raise KeyError(name)
+        return result
+
+    def list_push_configs(self, params: dict) -> dict:
+        task_id = parse_task_name(str(params.get("parent") or ""))
+        self.get_task(task_id)
+        page_size = int(params.get("pageSize") or 50)
+        if page_size < 1 or page_size > 100:
+            raise ValueError("pageSize must be between 1 and 100")
+        offset = decode_page_token(str(params.get("pageToken") or ""))
+        configs = self.store.list_push_configs(task_id)
+        page = configs[offset : offset + page_size]
+        next_offset = offset + page_size
+        return {
+            "configs": page,
+            "nextPageToken": encode_page_token(next_offset) if next_offset < len(configs) else "",
+        }
 
     def delete_push_config(self, params: dict) -> None:
-        task_id = str(params.get("id") or params.get("taskId") or "").strip()
-        if not task_id:
-            raise ValueError("Missing task id")
-        self.store.delete_push_config(task_id)
+        name = str(params.get("name") or "")
+        parse_push_config_name(name)
+        if self.store.get_push_config(name) is None:
+            raise KeyError(name)
+        self.store.delete_push_config(name)
+
+    def extended_agent_card(self) -> dict:
+        card = self.agent_card()
+        if card.get("capabilities", {}).get("extendedAgentCard") is not True:
+            raise A2AProtocolError(
+                ERROR_UNSUPPORTED_OPERATION,
+                "Extended agent card is not supported",
+            )
+        return card
 
     def close(self) -> None:
         self.store.close()
@@ -227,6 +400,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_stream(self, request_id, stream_responses: Iterable[dict]) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        for stream_response in stream_responses:
+            self.wfile.write(make_sse_payload(jsonrpc_success(request_id, stream_response)))
+            self.wfile.flush()
+
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
         if parsed.path == "/.well-known/agent-card.json":
@@ -237,19 +419,6 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
         if not self._require_auth():
             self._send_json({"error": "Unauthorized"}, status=HTTPStatus.UNAUTHORIZED)
-            return
-
-        if parsed.path.startswith("/tasks/") and parsed.path.endswith("/events"):
-            task_id = parsed.path.split("/")[2]
-            after_seq = int(parse_qs(parsed.query).get("after_seq", ["0"])[0])
-            events = self._service.resubscribe(task_id, after_seq=after_seq)
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            for event in events:
-                self.wfile.write(make_sse_payload(event["event"], event["data"]))
-                self.wfile.flush()
             return
 
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
@@ -265,90 +434,96 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
         content_length = int(self.headers.get("Content-Length", "0"))
         request_bytes = self.rfile.read(content_length)
-        request = json.loads(request_bytes.decode("utf-8"))
+        try:
+            request = json.loads(request_bytes.decode("utf-8"))
+        except json.JSONDecodeError:
+            self._send_json(jsonrpc_error(None, ERROR_PARSE, "Invalid JSON payload"))
+            return
         request_id = request.get("id")
         method = request.get("method")
         params = request.get("params") or {}
+        if self.headers.get("A2A-Version", "") != PROTOCOL_VERSION:
+            self._send_json(
+                jsonrpc_error(
+                    request_id,
+                    ERROR_VERSION_NOT_SUPPORTED,
+                    "A2A-Version header must be 1.0",
+                )
+            )
+            return
 
         try:
-            if method == "message/send":
+            if method == METHOD_SEND_MESSAGE:
                 task, _ = self._service.send_message(params, stream=False)
-                self._send_json({"jsonrpc": "2.0", "id": request_id, "result": task})
+                history_length = (params.get("configuration") or {}).get("historyLength")
+                result = {
+                    "task": trim_task_for_response(
+                        task,
+                        int(history_length) if history_length is not None else None,
+                    )
+                }
+                self._send_json(jsonrpc_success(request_id, result))
                 return
 
-            if method == "message/stream":
+            if method == METHOD_SEND_STREAMING_MESSAGE:
                 task, events = self._service.send_message(params, stream=True)
-                # This implementation buffers adapter output, then emits a
-                # compact SSE replay plus a final task snapshot for clients.
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
-                self.end_headers()
-                for event in events:
-                    self.wfile.write(make_sse_payload(event["event"], event["data"]))
-                    self.wfile.flush()
-                self.wfile.write(make_sse_payload("task", task))
-                self.wfile.flush()
+                self._send_stream(request_id, [*events, {"task": task}])
                 return
 
-            if method == "tasks/get":
-                task_id = str(params.get("id") or "")
-                self._send_json(
-                    {"jsonrpc": "2.0", "id": request_id, "result": self._service.get_task(task_id)}
+            if method == METHOD_GET_TASK:
+                task_id = parse_task_name(str(params.get("name") or ""))
+                history_length = params.get("historyLength")
+                task = trim_task_for_response(
+                    self._service.get_task(task_id),
+                    int(history_length) if history_length is not None else None,
                 )
+                self._send_json(jsonrpc_success(request_id, task))
                 return
 
-            if method == "tasks/cancel":
-                task_id = str(params.get("id") or "")
-                self._send_json(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "result": self._service.cancel_task(task_id),
-                    }
-                )
+            if method == METHOD_LIST_TASKS:
+                self._send_json(jsonrpc_success(request_id, self._service.list_tasks(params)))
                 return
 
-            if method == "tasks/resubscribe":
-                task_id = str(params.get("id") or "")
-                after_seq = int(params.get("afterSeq", 0))
-                events = self._service.resubscribe(task_id, after_seq=after_seq)
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
-                self.end_headers()
-                for event in events:
-                    self.wfile.write(make_sse_payload(event["event"], event["data"]))
-                    self.wfile.flush()
+            if method == METHOD_CANCEL_TASK:
+                task_id = parse_task_name(str(params.get("name") or ""))
+                self._send_json(jsonrpc_success(request_id, self._service.cancel_task(task_id)))
                 return
 
-            if method == "tasks/pushNotificationConfig/set":
-                result = self._service.set_push_config(params)
-                self._send_json({"jsonrpc": "2.0", "id": request_id, "result": result})
+            if method == METHOD_SUBSCRIBE_TO_TASK:
+                task_id = parse_task_name(str(params.get("name") or ""))
+                self._send_stream(request_id, self._service.subscribe_task(task_id))
                 return
 
-            if method == "tasks/pushNotificationConfig/get":
-                result = self._service.get_push_config(params)
-                self._send_json({"jsonrpc": "2.0", "id": request_id, "result": result})
+            if method == METHOD_CREATE_PUSH_CONFIG:
+                self._send_json(jsonrpc_success(request_id, self._service.create_push_config(params)))
                 return
 
-            if method == "tasks/pushNotificationConfig/list":
-                result = self._service.list_push_configs()
-                self._send_json({"jsonrpc": "2.0", "id": request_id, "result": result})
+            if method == METHOD_GET_PUSH_CONFIG:
+                self._send_json(jsonrpc_success(request_id, self._service.get_push_config(params)))
                 return
 
-            if method == "tasks/pushNotificationConfig/delete":
+            if method == METHOD_LIST_PUSH_CONFIGS:
+                self._send_json(jsonrpc_success(request_id, self._service.list_push_configs(params)))
+                return
+
+            if method == METHOD_DELETE_PUSH_CONFIG:
                 self._service.delete_push_config(params)
-                self._send_json({"jsonrpc": "2.0", "id": request_id, "result": None})
+                self._send_json(jsonrpc_success(request_id, None))
                 return
 
-            self._send_json(_jsonrpc_error(request_id, -32601, f"Unknown method: {method}"))
+            if method == METHOD_GET_EXTENDED_AGENT_CARD:
+                self._send_json(jsonrpc_success(request_id, self._service.extended_agent_card()))
+                return
+
+            self._send_json(jsonrpc_error(request_id, ERROR_METHOD_NOT_FOUND, f"Unknown method: {method}"))
+        except A2AProtocolError as exc:
+            self._send_json(jsonrpc_error(request_id, exc.code, exc.message))
         except KeyError as exc:
-            self._send_json(_jsonrpc_error(request_id, -32004, f"Task not found: {exc.args[0]}"))
+            self._send_json(jsonrpc_error(request_id, ERROR_TASK_NOT_FOUND, f"Task not found: {exc.args[0]}"))
         except ValueError as exc:
-            self._send_json(_jsonrpc_error(request_id, -32602, str(exc)))
+            self._send_json(jsonrpc_error(request_id, ERROR_INVALID_PARAMS, str(exc)))
         except Exception as exc:  # pragma: no cover - defensive path
-            self._send_json(_jsonrpc_error(request_id, -32000, str(exc)))
+            self._send_json(jsonrpc_error(request_id, ERROR_INTERNAL, str(exc)))
 
 
 class ManagedA2AServer:

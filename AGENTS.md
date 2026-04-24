@@ -66,9 +66,14 @@ behavior as the default path.
 The current inbound server exposes:
 
 - `GET /.well-known/agent-card.json`
-- `POST /rpc` for `message/send`, `message/stream`, `tasks/get`,
-  `tasks/cancel`, `tasks/resubscribe`, and push notification config methods
-- `GET /tasks/<task_id>/events?after_seq=<seq>` for SSE event replay
+- `POST /rpc` for official A2A 1.0 JSON-RPC methods: `SendMessage`,
+  `SendStreamingMessage`, `GetTask`, `ListTasks`, `CancelTask`,
+  `SubscribeToTask`, `CreateTaskPushNotificationConfig`,
+  `GetTaskPushNotificationConfig`, `ListTaskPushNotificationConfig`,
+  `DeleteTaskPushNotificationConfig`, and `GetExtendedAgentCard`
+
+Legacy slash-style JSON-RPC methods and custom SSE replay endpoints are not
+part of the public A2A surface.
 
 The current Hermes tools are:
 

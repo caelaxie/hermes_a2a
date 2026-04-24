@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import json
 import urllib.error
-import urllib.parse
 import urllib.request
 from typing import Iterator
+from uuid import uuid4
 
-from .config import A2APluginConfig, RemoteAgentPreset
+from .config import A2APluginConfig
+from .mapping import build_text_part
+from .protocol import (
+    METHOD_CANCEL_TASK,
+    METHOD_GET_TASK,
+    METHOD_SEND_MESSAGE,
+    METHOD_SEND_STREAMING_MESSAGE,
+    PROTOCOL_VERSION,
+    task_name,
+)
 
 
 class A2AClientError(RuntimeError):
@@ -60,7 +69,7 @@ class A2AClient:
     ):
         url = f"{self.base_url}{path}"
         payload = None
-        headers = {"Accept": accept, **self.headers}
+        headers = {"Accept": accept, "A2A-Version": PROTOCOL_VERSION, **self.headers}
         if body is not None:
             payload = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -88,18 +97,25 @@ class A2AClient:
         request = {
             "jsonrpc": "2.0",
             "id": "delegate",
-            "method": "message/send",
+            "method": METHOD_SEND_MESSAGE,
             "params": {
-                "taskId": task_id or None,
-                "contextId": context_id or None,
-                "message": {"role": "user", "parts": [{"type": "text", "text": message}]},
+                "message": {
+                    "messageId": str(uuid4()),
+                    "role": "ROLE_USER",
+                    "parts": [build_text_part(message)],
+                    **({"taskId": task_id} if task_id else {}),
+                    **({"contextId": context_id} if context_id else {}),
+                },
             },
         }
         with self._request("/rpc", request) as response:
             payload = json.loads(response.read().decode("utf-8"))
         if "error" in payload:
             raise A2AClientError(payload["error"]["message"])
-        return payload["result"]
+        result = payload.get("result") or {}
+        if "task" not in result:
+            raise A2AClientError("Remote SendMessage response did not contain result.task")
+        return result["task"]
 
     def stream_message(
         self,
@@ -110,34 +126,34 @@ class A2AClient:
         request = {
             "jsonrpc": "2.0",
             "id": "stream",
-            "method": "message/stream",
+            "method": METHOD_SEND_STREAMING_MESSAGE,
             "params": {
-                "taskId": task_id or None,
-                "contextId": context_id or None,
-                "message": {"role": "user", "parts": [{"type": "text", "text": message}]},
+                "message": {
+                    "messageId": str(uuid4()),
+                    "role": "ROLE_USER",
+                    "parts": [build_text_part(message)],
+                    **({"taskId": task_id} if task_id else {}),
+                    **({"contextId": context_id} if context_id else {}),
+                },
             },
         }
         with self._request("/rpc", request, accept="text/event-stream") as response:
-            event_name = "message"
             for raw_line in response:
                 line = raw_line.decode("utf-8").strip()
                 if not line:
                     continue
-                if line.startswith("event:"):
-                    event_name = line.split(":", 1)[1].strip()
-                    continue
                 if line.startswith("data:"):
-                    # The local server emits one JSON object per SSE `data:`
-                    # line, so this parser deliberately stays line-oriented.
-                    data = json.loads(line.split(":", 1)[1].strip())
-                    yield {"event": event_name, "data": data}
+                    payload = json.loads(line.split(":", 1)[1].strip())
+                    if "error" in payload:
+                        raise A2AClientError(payload["error"]["message"])
+                    yield payload["result"]
 
     def get_task(self, task_id: str) -> dict:
         request = {
             "jsonrpc": "2.0",
             "id": "task-get",
-            "method": "tasks/get",
-            "params": {"id": task_id},
+            "method": METHOD_GET_TASK,
+            "params": {"name": task_name(task_id)},
         }
         with self._request("/rpc", request) as response:
             payload = json.loads(response.read().decode("utf-8"))
@@ -149,8 +165,8 @@ class A2AClient:
         request = {
             "jsonrpc": "2.0",
             "id": "task-cancel",
-            "method": "tasks/cancel",
-            "params": {"id": task_id},
+            "method": METHOD_CANCEL_TASK,
+            "params": {"name": task_name(task_id)},
         }
         with self._request("/rpc", request) as response:
             payload = json.loads(response.read().decode("utf-8"))

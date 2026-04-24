@@ -8,15 +8,16 @@ import threading
 from pathlib import Path
 
 from .mapping import utc_timestamp
+from .protocol import push_config_name
 
 
 class SQLiteTaskStore:
     """Persist protocol-facing state outside the transport layer.
 
-    Task snapshots are optimized for current `tasks/get` responses. The event
-    journal is kept separately so SSE resubscribe can replay updates, and remote
-    delegation mappings stay outside snapshots so local task IDs can remain the
-    lookup key for Hermes tools.
+    Task snapshots are optimized for official `GetTask` and `ListTasks`
+    responses. The event journal stores StreamResponse payloads for
+    `SubscribeToTask`, and remote delegation mappings stay outside snapshots so
+    local task IDs can remain the lookup key for Hermes tools.
     """
 
     def __init__(self, path: str) -> None:
@@ -50,9 +51,12 @@ class SQLiteTaskStore:
                 );
 
                 CREATE TABLE IF NOT EXISTS push_configs (
-                    task_id TEXT PRIMARY KEY,
+                    name TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    config_id TEXT NOT NULL,
                     url TEXT NOT NULL,
                     token TEXT,
+                    config_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -70,7 +74,7 @@ class SQLiteTaskStore:
     def upsert_task(self, task: dict, direction: str) -> None:
         with self._lock, self._conn:
             now = utc_timestamp()
-            created_at = task.get("createdAt", now)
+            created_at = task.get("status", {}).get("timestamp", now)
             self._conn.execute(
                 """
                 INSERT INTO tasks (task_id, direction, context_id, state, snapshot_json, created_at, updated_at)
@@ -86,7 +90,7 @@ class SQLiteTaskStore:
                     task["id"],
                     direction,
                     task.get("contextId", task["id"]),
-                    task.get("status", {}).get("state", "submitted"),
+                    task.get("status", {}).get("state", "TASK_STATE_SUBMITTED"),
                     json.dumps(task, sort_keys=True),
                     created_at,
                     now,
@@ -114,83 +118,89 @@ class SQLiteTaskStore:
             ).fetchall()
         return [json.loads(row["snapshot_json"]) for row in rows]
 
-    def append_event(self, task_id: str, event_type: str, payload: dict) -> int:
+    def append_event(self, task_id: str, payload: dict) -> int:
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 """
                 INSERT INTO events (task_id, event_type, payload_json, created_at)
                 VALUES (?, ?, ?, ?)
                 """,
-                (task_id, event_type, json.dumps(payload, sort_keys=True), utc_timestamp()),
+                (task_id, next(iter(payload.keys()), "task"), json.dumps(payload, sort_keys=True), utc_timestamp()),
             )
             return int(cursor.lastrowid)
 
-    def list_events(self, task_id: str, after_seq: int = 0) -> list[dict]:
+    def list_events(self, task_id: str) -> list[dict]:
         rows = self._conn.execute(
             """
             SELECT seq, event_type, payload_json, created_at
             FROM events
-            WHERE task_id = ? AND seq > ?
+            WHERE task_id = ?
             ORDER BY seq ASC
             """,
-            (task_id, after_seq),
+            (task_id,),
         ).fetchall()
-        results: list[dict] = []
-        for row in rows:
-            payload = json.loads(row["payload_json"])
-            results.append(
-                {
-                    "sequence": row["seq"],
-                    "event": row["event_type"],
-                    "data": payload,
-                    "createdAt": row["created_at"],
-                }
-            )
-        return results
+        return [json.loads(row["payload_json"]) for row in rows]
 
-    def set_push_config(self, task_id: str, url: str, token: str = "") -> dict:
+    def set_push_config(
+        self,
+        task_id: str,
+        config_id: str,
+        config: dict,
+    ) -> dict:
         now = utc_timestamp()
+        name = push_config_name(task_id, config_id)
+        push_config = dict(config.get("pushNotificationConfig") or config)
+        push_config.setdefault("id", config_id)
+        push_config.setdefault("url", "")
+        push_config.setdefault("token", "")
+        stored = {"name": name, "pushNotificationConfig": push_config}
         with self._lock, self._conn:
             self._conn.execute(
                 """
-                INSERT INTO push_configs (task_id, url, token, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(task_id) DO UPDATE SET
+                INSERT INTO push_configs
+                    (name, task_id, config_id, url, token, config_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
                     url = excluded.url,
                     token = excluded.token,
+                    config_json = excluded.config_json,
                     updated_at = excluded.updated_at
                 """,
-                (task_id, url, token, now, now),
+                (
+                    name,
+                    task_id,
+                    config_id,
+                    str(push_config.get("url", "")),
+                    str(push_config.get("token", "")),
+                    json.dumps(stored, sort_keys=True),
+                    now,
+                    now,
+                ),
             )
-        return {"taskId": task_id, "pushNotificationConfig": {"url": url, "token": token}}
+        return stored
 
-    def get_push_config(self, task_id: str) -> dict | None:
+    def get_push_config(self, name: str) -> dict | None:
         row = self._conn.execute(
-            "SELECT task_id, url, token FROM push_configs WHERE task_id = ?",
-            (task_id,),
+            "SELECT config_json FROM push_configs WHERE name = ?",
+            (name,),
         ).fetchone()
         if row is None:
             return None
-        return {
-            "taskId": row["task_id"],
-            "pushNotificationConfig": {"url": row["url"], "token": row["token"] or ""},
-        }
+        return json.loads(row["config_json"])
 
-    def list_push_configs(self) -> list[dict]:
+    def list_push_configs(self, task_id: str) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT task_id, url, token FROM push_configs ORDER BY task_id ASC"
+            "SELECT config_json FROM push_configs WHERE task_id = ? ORDER BY config_id ASC",
+            (task_id,),
         ).fetchall()
-        return [
-            {
-                "taskId": row["task_id"],
-                "pushNotificationConfig": {"url": row["url"], "token": row["token"] or ""},
-            }
-            for row in rows
-        ]
+        return [json.loads(row["config_json"]) for row in rows]
 
-    def delete_push_config(self, task_id: str) -> None:
+    def delete_push_config(self, name: str) -> None:
         with self._lock, self._conn:
-            self._conn.execute("DELETE FROM push_configs WHERE task_id = ?", (task_id,))
+            self._conn.execute("DELETE FROM push_configs WHERE name = ?", (name,))
+
+    def list_push_configs_for_task(self, task_id: str) -> list[dict]:
+        return self.list_push_configs(task_id)
 
     def set_remote_task(self, task_id: str, agent_url: str, remote_task_id: str) -> None:
         now = utc_timestamp()
