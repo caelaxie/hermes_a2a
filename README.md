@@ -200,6 +200,12 @@ Example push notification config request:
 - The Hermes subprocess adapter starts streaming immediately with a task status
   update, then emits the final Hermes CLI output after `hermes chat` returns.
   It does not yet stream individual model tokens from the Hermes CLI.
+- The AgentCard keeps the official A2A `streaming: true` capability because
+  `SendStreamingMessage` and `SubscribeToTask` return SSE task events. It also
+  advertises the non-required
+  `https://github.com/caelaxie/hermes_a2a/extensions/runtime-streaming`
+  extension so clients can distinguish task-event streaming from token/tool
+  runtime streaming.
 - The SQLite store is durable by default and keeps official A2A task snapshots,
   StreamResponse event payloads, remote delegation tracking, and named inbound
   push notification config state.
