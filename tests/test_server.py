@@ -7,6 +7,7 @@ import os
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -132,8 +133,18 @@ class ServerTests(unittest.TestCase):
         ) as response:
             card = json.loads(response.read().decode("utf-8"))
 
-        self.assertEqual(card["protocolVersions"], ["1.0"])
-        self.assertEqual(card["supportedInterfaces"][0]["protocolBinding"], "JSONRPC")
+        self.assertEqual(
+            card["supportedInterfaces"],
+            [
+                {
+                    "url": f"{self.server.base_url}/rpc",
+                    "protocolBinding": "JSONRPC",
+                    "protocolVersion": "1.0",
+                }
+            ],
+        )
+        self.assertNotIn("url", card)
+        self.assertNotIn("protocolVersions", card)
         self.assertNotIn("protocolVersion", card)
         self.assertNotIn("preferredTransport", card)
         self.assertEqual(card["skills"][0]["inputModes"], ["text/plain", "application/json"])
@@ -147,6 +158,57 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(fetched["result"]["id"], task_id)
         self.assertEqual(len(fetched["result"]["history"]), 1)
         self._assert_no_legacy_task_fields(task)
+
+    def test_bearer_agent_card_remains_public_and_declares_security(self) -> None:
+        config = A2APluginConfig(
+            host="127.0.0.1",
+            port=0,
+            store_path=str(Path(self.tmpdir.name) / "auth-server.db"),
+            bearer_token="secret",
+            exported_skills=["delegate"],
+            execution_adapter="demo",
+        )
+        auth_server = create_server(config=config)
+        auth_server.start()
+        try:
+            with urllib.request.urlopen(
+                f"{auth_server.base_url}/.well-known/agent-card.json", timeout=5
+            ) as response:
+                card = json.loads(response.read().decode("utf-8"))
+
+            self.assertEqual(
+                card["securitySchemes"],
+                {
+                    "bearerAuth": {
+                        "httpAuthSecurityScheme": {
+                            "scheme": "Bearer",
+                        }
+                    }
+                },
+            )
+            self.assertEqual(card["security"], [{"bearerAuth": []}])
+
+            payload = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "test",
+                    "method": "SendMessage",
+                    "params": {"message": self._message("hello")},
+                }
+            ).encode("utf-8")
+            request = urllib.request.Request(
+                f"{auth_server.base_url}/rpc",
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "A2A-Version": PROTOCOL_VERSION,
+                },
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(request, timeout=5)
+            self.assertEqual(raised.exception.code, 401)
+        finally:
+            auth_server.stop()
 
     def test_stream_subscribe_list_cancel_and_push_config_crud(self) -> None:
         stream_events = self._read_stream(
