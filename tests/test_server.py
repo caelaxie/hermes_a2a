@@ -20,6 +20,7 @@ sys_path = str(ROOT / "src")
 if sys_path not in os.sys.path:
     os.sys.path.insert(0, sys_path)
 
+from hermes_a2a.adapter import HermesEvent, HermesExecutionAdapter
 from hermes_a2a.config import A2APluginConfig
 from hermes_a2a.protocol import (
     ERROR_INVALID_PARAMS,
@@ -30,6 +31,98 @@ from hermes_a2a.protocol import (
 )
 from hermes_a2a.server import create_server
 from hermes_a2a.tools import tool_a2a_delegate, tool_a2a_get_task
+
+
+class BlockingStreamAdapter(HermesExecutionAdapter):
+    def __init__(self) -> None:
+        self.first_event_yielded = threading.Event()
+        self.release = threading.Event()
+
+    def _events(self, task_id: str, context_id: str) -> list[HermesEvent]:
+        return [
+            HermesEvent(
+                kind="status",
+                state="working",
+                message="blocking adapter started",
+                metadata={"task_id": task_id, "context_id": context_id},
+            ),
+            HermesEvent(
+                kind="artifact",
+                state="working",
+                message="blocking adapter output emitted",
+                text="finished",
+                metadata={"artifact_id": "blocking-output"},
+            ),
+            HermesEvent(
+                kind="status",
+                state="completed",
+                message="blocking adapter completed",
+                metadata={"task_id": task_id, "context_id": context_id},
+            ),
+        ]
+
+    def start(
+        self,
+        task_id: str,
+        context_id: str,
+        message: str,
+        metadata: dict | None = None,
+    ):
+        del message, metadata
+        return self._events(task_id, context_id)
+
+    def continue_task(
+        self,
+        task_id: str,
+        context_id: str,
+        message: str,
+        metadata: dict | None = None,
+    ):
+        del message, metadata
+        return self._events(task_id, context_id)
+
+    def stream(
+        self,
+        task_id: str,
+        context_id: str,
+        message: str,
+        metadata: dict | None = None,
+    ):
+        del message, metadata
+        events = self._events(task_id, context_id)
+        self.first_event_yielded.set()
+        yield events[0]
+        self.release.wait(timeout=5)
+        yield from events[1:]
+
+    def cancel(
+        self,
+        task_id: str,
+        context_id: str,
+        metadata: dict | None = None,
+    ):
+        del metadata
+        return [
+            HermesEvent(
+                kind="status",
+                state="canceled",
+                message="blocking adapter canceled",
+                metadata={"task_id": task_id, "context_id": context_id},
+            )
+        ]
+
+    def finalize_task(
+        self,
+        task_id: str,
+        context_id: str,
+        metadata: dict | None = None,
+    ) -> dict:
+        return {
+            "taskId": task_id,
+            "contextId": context_id,
+            "adapter": "blocking",
+            "metadata": metadata or {},
+        }
 
 
 class ServerTests(unittest.TestCase):
@@ -76,6 +169,27 @@ class ServerTests(unittest.TestCase):
             headers["A2A-Version"] = version
         request = urllib.request.Request(
             f"{self.server.base_url}/rpc",
+            data=payload,
+            headers=headers,
+        )
+        return urllib.request.urlopen(request, timeout=5)
+
+    def _rpc_to_server(
+        self,
+        base_url: str,
+        method: str,
+        params: dict,
+        accept: str = "application/json",
+        version: str | None = PROTOCOL_VERSION,
+    ):
+        payload = json.dumps(
+            {"jsonrpc": "2.0", "id": "test", "method": method, "params": params}
+        ).encode("utf-8")
+        headers = {"Content-Type": "application/json", "Accept": accept}
+        if version is not None:
+            headers["A2A-Version"] = version
+        request = urllib.request.Request(
+            f"{base_url}/rpc",
             data=payload,
             headers=headers,
         )
@@ -197,6 +311,7 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("protocolVersions", card)
         self.assertNotIn("protocolVersion", card)
         self.assertNotIn("preferredTransport", card)
+        self.assertTrue(card["capabilities"]["streaming"])
         self.assertEqual(card["skills"][0]["inputModes"], ["text/plain", "application/json"])
         self.assertEqual(cache_control, "public, max-age=300")
         self.assertTrue(etag)
@@ -354,6 +469,54 @@ class ServerTests(unittest.TestCase):
             {"taskId": task_id, "id": "cfg-1"},
         )
         self.assertIsNone(delete_payload["result"])
+
+    def test_send_streaming_message_flushes_events_before_adapter_finishes(self) -> None:
+        adapter = BlockingStreamAdapter()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = A2APluginConfig(
+                host="127.0.0.1",
+                port=0,
+                store_path=str(Path(tmpdir) / "stream.db"),
+                execution_adapter="demo",
+            )
+            server = create_server(config=config, adapter=adapter)
+            server.start()
+            first_line: dict[str, str] = {}
+            first_line_read = threading.Event()
+            client_error: list[BaseException] = []
+
+            def read_first_stream_line() -> None:
+                try:
+                    with self._rpc_to_server(
+                        server.base_url,
+                        "SendStreamingMessage",
+                        {"message": self._message("slow hello")},
+                        accept="text/event-stream",
+                    ) as response:
+                        first_line["content_type"] = response.headers.get_content_type()
+                        first_line["line"] = response.readline().decode("utf-8")
+                        first_line_read.set()
+                        response.read()
+                except BaseException as exc:  # pragma: no cover - failure diagnostics
+                    client_error.append(exc)
+
+            client = threading.Thread(target=read_first_stream_line)
+            client.start()
+            try:
+                self.assertTrue(adapter.first_event_yielded.wait(timeout=2))
+                self.assertTrue(
+                    first_line_read.wait(timeout=0.5),
+                    "first SSE frame stayed buffered until task completion",
+                )
+                self.assertFalse(client_error)
+                self.assertEqual(first_line["content_type"], "text/event-stream")
+                self.assertTrue(first_line["line"].startswith("data: "))
+                payload = json.loads(first_line["line"].split(":", 1)[1].strip())
+                self.assertIn("statusUpdate", payload["result"])
+            finally:
+                adapter.release.set()
+                client.join(timeout=2)
+                server.stop()
 
     def test_send_message_configuration_registers_push_config(self) -> None:
         callback, callback_url, callback_server, callback_thread = self._start_callback_server()

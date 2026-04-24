@@ -167,8 +167,9 @@ Example push notification config request:
   `SendStreamingMessage` calls through `hermes chat -q ... --quiet`. Set
   `A2A_EXECUTION_ADAPTER=demo` to use the deterministic demo adapter for
   protocol testing without invoking a model.
-- The Hermes subprocess adapter is synchronous: streaming endpoints emit A2A
-  JSON-RPC SSE `data:` frames after the underlying Hermes CLI call returns.
+- The Hermes subprocess adapter starts streaming immediately with a task status
+  update, then emits the final Hermes CLI output after `hermes chat` returns.
+  It does not yet stream individual model tokens from the Hermes CLI.
 - The SQLite store is durable by default and keeps official A2A task snapshots,
   StreamResponse event payloads, remote delegation tracking, and named inbound
   push notification config state.

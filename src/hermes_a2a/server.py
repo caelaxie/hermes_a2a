@@ -154,11 +154,7 @@ class A2AService:
                 # Push delivery is best-effort. The event remains durable in SQLite.
                 continue
 
-    def send_message(
-        self,
-        params: dict,
-        stream: bool = False,
-    ) -> tuple[dict, list[dict]]:
+    def _prepare_message_task(self, params: dict) -> tuple[dict, str, str, str]:
         message = params.get("message")
         message_text = extract_text_from_message(message)
         if not isinstance(message, dict):
@@ -184,6 +180,30 @@ class A2AService:
         else:
             task.setdefault("history", []).append(message)
         self._configure_push_from_send_message(task_id, params.get("configuration") or {})
+        return task, task_id, context_id, message_text
+
+    def _record_adapter_event(self, task: dict, task_id: str, adapter_event) -> dict:
+        stream_response = apply_hermes_event(task, adapter_event)
+        self.store.append_event(task_id, stream_response)
+        self._notify_push(task_id, stream_response)
+        return stream_response
+
+    def _finalize_message_task(self, task: dict, task_id: str, context_id: str) -> None:
+        adapter_metadata = self.adapter.finalize_task(task_id, context_id)
+        task.setdefault("metadata", {}).update(
+            {
+                "adapter": adapter_metadata.get("adapter", "unknown"),
+                "adapterMetadata": adapter_metadata.get("metadata", {}),
+            }
+        )
+        self.store.upsert_task(task, direction="inbound")
+
+    def send_message(
+        self,
+        params: dict,
+        stream: bool = False,
+    ) -> tuple[dict, list[dict]]:
+        task, task_id, context_id, message_text = self._prepare_message_task(params)
         events: list[dict] = []
 
         # Persist each mapped event before push delivery. If a callback fails,
@@ -195,20 +215,35 @@ class A2AService:
             stream=stream,
             metadata={"mode": "stream" if stream else "send"},
         ):
-            stream_response = apply_hermes_event(task, adapter_event)
-            self.store.append_event(task_id, stream_response)
+            stream_response = self._record_adapter_event(task, task_id, adapter_event)
             events.append(stream_response)
-            self._notify_push(task_id, stream_response)
 
-        adapter_metadata = self.adapter.finalize_task(task_id, context_id)
-        task.setdefault("metadata", {}).update(
-            {
-                "adapter": adapter_metadata.get("adapter", "unknown"),
-                "adapterMetadata": adapter_metadata.get("metadata", {}),
-            }
-        )
-        self.store.upsert_task(task, direction="inbound")
+        self._finalize_message_task(task, task_id, context_id)
         return task, events
+
+    def stream_message(self, params: dict) -> Iterable[dict]:
+        task, task_id, context_id, message_text = self._prepare_message_task(params)
+
+        def stream_responses() -> Iterable[dict]:
+            finalized = False
+            try:
+                for adapter_event in self._iter_adapter_events(
+                    task_id,
+                    context_id,
+                    message_text,
+                    stream=True,
+                    metadata={"mode": "stream"},
+                ):
+                    yield self._record_adapter_event(task, task_id, adapter_event)
+
+                self._finalize_message_task(task, task_id, context_id)
+                finalized = True
+                yield {"task": task}
+            finally:
+                if not finalized:
+                    self._finalize_message_task(task, task_id, context_id)
+
+        return stream_responses()
 
     def _configure_push_from_send_message(self, task_id: str, configuration: dict) -> None:
         if not isinstance(configuration, dict):
@@ -417,8 +452,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         for stream_response in stream_responses:
-            self.wfile.write(make_sse_payload(jsonrpc_success(request_id, stream_response)))
-            self.wfile.flush()
+            try:
+                self.wfile.write(make_sse_payload(jsonrpc_success(request_id, stream_response)))
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
@@ -477,8 +515,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return
 
             if method == METHOD_SEND_STREAMING_MESSAGE:
-                task, events = self._service.send_message(params, stream=True)
-                self._send_stream(request_id, [*events, {"task": task}])
+                self._send_stream(request_id, self._service.stream_message(params))
                 return
 
             if method == METHOD_GET_TASK:
