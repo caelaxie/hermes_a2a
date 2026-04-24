@@ -93,6 +93,126 @@ After installing a Hermes build with that support, verify the top-level path:
 hermes a2a status
 ```
 
+### Persistent inbound server
+
+For local protocol tests, running the bridge in the foreground is enough:
+
+```bash
+uv run hermes-a2a serve
+```
+
+For a deployment that other A2A clients can discover and delegate to, supervise
+the same command so `A2A_PUBLIC_BASE_URL` stays continuously reachable. A
+systemd user service is the simplest Linux pattern because stdout and stderr are
+captured in the user journal and the process can restart after failures.
+
+Create an environment file such as `~/.config/hermes-a2a/env`:
+
+```ini
+A2A_HOST=127.0.0.1
+A2A_PORT=8000
+A2A_PUBLIC_BASE_URL=https://a2a.example.com
+A2A_STORE_PATH=/home/alice/.local/share/hermes-a2a/state.db
+A2A_BEARER_TOKEN=replace-with-a-long-random-token
+A2A_DEFAULT_TIMEOUT_SECONDS=120
+A2A_EXECUTION_ADAPTER=hermes
+A2A_HERMES_COMMAND=/usr/local/bin/hermes
+```
+
+Use `A2A_HOST=0.0.0.0` only when the process should accept direct network
+connections. Keep `A2A_STORE_PATH` on persistent storage and protect the env
+file if it contains `A2A_BEARER_TOKEN`:
+
+```bash
+mkdir -p ~/.config/hermes-a2a ~/.local/share/hermes-a2a
+chmod 700 ~/.config/hermes-a2a ~/.local/share/hermes-a2a
+chmod 600 ~/.config/hermes-a2a/env
+```
+
+Install the package or clone in a stable location, then use an absolute
+`hermes-a2a` path in `~/.config/systemd/user/hermes-a2a.service`:
+
+```ini
+[Unit]
+Description=Hermes A2A inbound bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/hermes-a2a
+EnvironmentFile=%h/.config/hermes-a2a/env
+ExecStart=%h/.local/pipx/venvs/hermes-a2a/bin/hermes-a2a serve
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
+```
+
+Adjust `ExecStart` to the actual console script path for your installation. If
+you keep the repo checkout and run through uv, use the absolute uv path with
+`--directory /path/to/hermes_a2a hermes-a2a serve`. Then enable and start the
+service:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now hermes-a2a.service
+systemctl --user status hermes-a2a.service
+journalctl --user -u hermes-a2a.service -f
+```
+
+If the service must start before the user logs in, enable lingering for that
+account with `loginctl enable-linger "$USER"`.
+
+When exposing the bridge through a reverse proxy, terminate TLS at the proxy and
+set `A2A_PUBLIC_BASE_URL` to the external HTTPS origin. Forward both
+`/.well-known/agent-card.json` and `/rpc` to the same local service. The
+AgentCard endpoint intentionally remains publicly discoverable so clients can
+read the bridge URL, protocol version, and advertised security scheme. When
+`A2A_BEARER_TOKEN` is set, `/rpc` requires `Authorization: Bearer ...`.
+Preserve the `Authorization` and `A2A-Version` headers, allow request durations
+at least as long as `A2A_DEFAULT_TIMEOUT_SECONDS`, and disable response
+buffering for SSE calls to `SendStreamingMessage` and `SubscribeToTask`.
+
+Containers follow the same runtime contract: run `hermes-a2a serve` as the main
+process, set `A2A_HOST=0.0.0.0`, publish `A2A_PORT`, mount a persistent
+`A2A_STORE_PATH`, inject secrets through the orchestrator, and collect stdout
+and stderr with the platform log driver.
+
+Verify a deployment from outside the host or proxy:
+
+```bash
+BASE_URL=https://a2a.example.com
+TOKEN=replace-with-a-long-random-token
+
+curl -sS "$BASE_URL/.well-known/agent-card.json"
+
+hermes-a2a status
+# Or, from Hermes, call the registered `a2a_status` tool.
+
+curl -sS "$BASE_URL/rpc" \
+  -H "Content-Type: application/json" \
+  -H "A2A-Version: 1.0" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "deploy-check-1",
+    "method": "SendMessage",
+    "params": {
+      "message": {
+        "messageId": "deploy-check-message-1",
+        "role": "ROLE_USER",
+        "parts": [{"text": "hello from deployment check"}]
+      }
+    }
+  }'
+```
+
+For deterministic smoke tests that do not invoke Hermes or a model, temporarily
+set `A2A_EXECUTION_ADAPTER=demo`, restart the service, run the same `SendMessage`
+check, then restore `A2A_EXECUTION_ADAPTER=hermes` for real delegation.
+
 ## Runtime surfaces
 
 - Inbound server:
