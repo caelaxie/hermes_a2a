@@ -65,21 +65,23 @@ Then restart Hermes and verify the plugin is visible:
 hermes plugins list
 ```
 
-If your Hermes version supports top-level CLI commands from standalone plugins,
-you can use:
+Use the plugin-owned console script for CLI operations:
+
+```bash
+uv run hermes-a2a status
+uv run hermes-a2a card
+```
+
+Some Hermes versions may also expose standalone plugin CLI commands at the
+top level after the plugin is enabled:
 
 ```bash
 hermes a2a status
 hermes a2a card
 ```
 
-For Hermes versions that do not yet discover standalone plugin CLI commands, use
-the plugin-owned console script instead:
-
-```bash
-uv run hermes-a2a status
-uv run hermes-a2a card
-```
+Treat `hermes-a2a` as the reliable command until Hermes core exposes
+standalone plugin CLI discovery in your installation.
 
 ## Runtime surfaces
 
@@ -102,12 +104,15 @@ uv run hermes-a2a card
   - `a2a_cancel_task`
   - `a2a_delegate`
 - CLI:
-  - `hermes a2a status`
-  - `hermes a2a card`
-  - `hermes a2a serve`
-  - `hermes a2a agents list`
-  - `hermes a2a task get <id>`
-  - `hermes a2a task cancel <id>`
+  - `hermes-a2a status`
+  - `hermes-a2a card`
+  - `hermes-a2a serve`
+  - `hermes-a2a agents list`
+  - `hermes-a2a task get <id>`
+  - `hermes-a2a task cancel <id>`
+
+  Hermes versions with standalone plugin CLI discovery may additionally support
+  the same commands under `hermes a2a ...`.
 
 ## Config
 
@@ -120,6 +125,8 @@ The plugin is configured through environment variables:
 - `A2A_BEARER_TOKEN`
 - `A2A_EXPORTED_SKILLS`
 - `A2A_REMOTE_AGENTS_JSON`
+- `A2A_DEFAULT_TIMEOUT_SECONDS` (`120` by default for Hermes runtime and
+  outbound A2A calls)
 - `A2A_EXECUTION_ADAPTER` (`hermes` by default, set to `demo` for deterministic protocol testing)
 - `A2A_HERMES_COMMAND` (`hermes` by default)
 - `A2A_HERMES_EXTRA_ARGS` (optional shell-style arguments appended to `hermes chat`)
@@ -142,7 +149,27 @@ The plugin is configured through environment variables:
 
 - JSON-RPC requests must include `A2A-Version: 1.0`. Legacy slash-style methods
   such as `message/send` and old task/message/part response fields are not
-  supported.
+  supported. A missing version header is rejected because this server only
+  advertises A2A 1.0 in its AgentCard `supportedInterfaces`.
+- The official Python SDK `ClientFactory` path sets the A2A version header on
+  its HTTP client. Prefer that path for SDK clients:
+
+  ```python
+  from a2a.client import ClientConfig, ClientFactory
+
+  factory = ClientFactory(ClientConfig(streaming=False))
+  client = await factory.create_from_url("http://127.0.0.1:9999")
+  ```
+
+  If you build raw HTTP requests or instantiate lower-level SDK transports
+  directly, set the header yourself:
+
+  ```python
+  headers = {
+      "Content-Type": "application/json",
+      "A2A-Version": "1.0",
+  }
+  ```
 - Task RPCs use direct task IDs in params such as `{"id": "task-id"}`. Push
   notification config RPCs use the flat A2A 1.0 `TaskPushNotificationConfig`
   shape with `taskId`, config `id`, `url`, optional `token`, and optional
@@ -167,6 +194,9 @@ Example push notification config request:
   `SendStreamingMessage` calls through `hermes chat -q ... --quiet`. Set
   `A2A_EXECUTION_ADAPTER=demo` to use the deterministic demo adapter for
   protocol testing without invoking a model.
+- The default runtime timeout is 120 seconds. Override it with
+  `A2A_DEFAULT_TIMEOUT_SECONDS` when a deployment needs shorter or longer model
+  execution and remote-agent request windows.
 - The Hermes subprocess adapter starts streaming immediately with a task status
   update, then emits the final Hermes CLI output after `hermes chat` returns.
   It does not yet stream individual model tokens from the Hermes CLI.

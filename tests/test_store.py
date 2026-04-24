@@ -52,11 +52,14 @@ class StoreTests(unittest.TestCase):
                 },
             )
             store.set_remote_task("task-1", "https://agent.test", "task-1")
+            store.set_hermes_session("task-1", "ctx-1", "20260424_101500_abc123")
 
             stored = store.get_task("task-1")
             events = store.list_events("task-1")
             push = store.get_push_config(config_name)
             remote = store.get_remote_task("task-1")
+            hermes_session = store.get_hermes_session("task-1")
+            context_session = store.get_hermes_session("missing-task", "ctx-1")
             store.close()
 
         self.assertEqual(stored["id"], "task-1")
@@ -67,3 +70,5 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(push["url"], "https://callback.test")
         self.assertEqual(push["token"], "token")
         self.assertEqual(remote["agentUrl"], "https://agent.test")
+        self.assertEqual(hermes_session["hermesSessionId"], "20260424_101500_abc123")
+        self.assertEqual(context_session["taskId"], "task-1")

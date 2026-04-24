@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
@@ -21,6 +22,7 @@ if sys_path not in os.sys.path:
     os.sys.path.insert(0, sys_path)
 
 from hermes_a2a.adapter import HermesEvent, HermesExecutionAdapter
+from hermes_a2a.client import A2AClient
 from hermes_a2a.config import A2APluginConfig
 from hermes_a2a.protocol import (
     ERROR_INVALID_PARAMS,
@@ -329,6 +331,12 @@ class ServerTests(unittest.TestCase):
         self._assert_task(task)
 
     def test_bearer_agent_card_remains_public_and_declares_security(self) -> None:
+        try:
+            from a2a.types.a2a_pb2 import AgentCard
+            from google.protobuf.json_format import ParseDict
+        except ImportError as exc:
+            self.skipTest(f"a2a-sdk protobuf parser unavailable: {exc}")
+
         config = A2APluginConfig(
             host="127.0.0.1",
             port=0,
@@ -355,7 +363,9 @@ class ServerTests(unittest.TestCase):
                     }
                 },
             )
-            self.assertEqual(card["security"], [{"bearerAuth": []}])
+            self.assertNotIn("security", card)
+            self.assertEqual(card["securityRequirements"], [{"schemes": {"bearerAuth": []}}])
+            ParseDict(card, AgentCard(), ignore_unknown_fields=False)
 
             payload = json.dumps(
                 {
@@ -663,6 +673,47 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(legacy["error"]["code"], ERROR_METHOD_NOT_FOUND)
         self.assertEqual(extended["error"]["code"], ERROR_UNSUPPORTED_OPERATION)
 
+    def test_official_sdk_jsonrpc_client_sends_required_version_header(self) -> None:
+        try:
+            import httpx
+            from a2a.client import ClientConfig, ClientFactory
+            from a2a.types.a2a_pb2 import (
+                Message,
+                Part,
+                ROLE_USER,
+                SendMessageRequest,
+                TASK_STATE_COMPLETED,
+            )
+        except ImportError as exc:
+            self.skipTest(f"optional a2a-sdk extra is not installed: {exc}")
+
+        async def run_sdk_request() -> int:
+            http_client = httpx.AsyncClient(trust_env=False)
+            client = await ClientFactory(
+                ClientConfig(streaming=False, httpx_client=http_client)
+            ).create_from_url(
+                self.server.base_url,
+                resolver_http_kwargs={"follow_redirects": False},
+            )
+            try:
+                request = SendMessageRequest(
+                    message=Message(
+                        message_id=str(uuid4()),
+                        role=ROLE_USER,
+                        parts=[Part(text="hello from sdk")],
+                    )
+                )
+                events = [event async for event in client.send_message(request)]
+            finally:
+                await client.close()
+            self.assertEqual(len(events), 1)
+            self.assertTrue(events[0].HasField("task"))
+            return events[0].task.status.state
+
+        state = asyncio.run(run_sdk_request())
+
+        self.assertEqual(state, TASK_STATE_COMPLETED)
+
     def test_outbound_delegate_round_trips_against_local_server(self) -> None:
         env = {
             "A2A_STORE_PATH": str(Path(self.tmpdir.name) / "client.db"),
@@ -678,3 +729,103 @@ class ServerTests(unittest.TestCase):
 
         self.assertEqual(delegated["task"]["status"]["state"], "TASK_STATE_COMPLETED")
         self.assertEqual(refreshed["id"], delegated["task"]["id"])
+
+    def test_outbound_client_uses_jsonrpc_url_from_agent_card(self) -> None:
+        requests = []
+
+        class CustomRpcHandler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+                if self.path != "/.well-known/agent-card.json":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
+                payload = {
+                    "name": "Custom RPC Agent",
+                    "description": "Test agent with a non-default JSON-RPC path.",
+                    "supportedInterfaces": [
+                        {
+                            "url": f"{base_url}/a2a",
+                            "protocolBinding": "JSONRPC",
+                            "protocolVersion": "1.0",
+                        }
+                    ],
+                    "version": "test",
+                    "defaultInputModes": ["text/plain"],
+                    "defaultOutputModes": ["text/plain"],
+                    "capabilities": {"streaming": True},
+                    "skills": [],
+                }
+                body = json.dumps(payload).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
+                requests.append(self.path)
+                if self.path != "/a2a":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                payload = json.loads(body.decode("utf-8"))
+                task = {
+                    "id": "remote-task",
+                    "contextId": "remote-task",
+                    "status": {"state": "TASK_STATE_COMPLETED"},
+                    "history": [],
+                }
+                if payload["method"] == "SendStreamingMessage":
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": payload["id"],
+                        "result": {"task": task},
+                    }
+                    response_body = f"data: {json.dumps(response)}\n\n".encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Content-Length", str(len(response_body)))
+                    self.end_headers()
+                    self.wfile.write(response_body)
+                    return
+                if payload["method"] == "SendMessage":
+                    result = {"task": task}
+                elif payload["method"] in {"GetTask", "CancelTask"}:
+                    result = task
+                else:
+                    result = None
+                response = {"jsonrpc": "2.0", "id": payload["id"], "result": result}
+                response_body = json.dumps(response).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+
+            def log_message(self, format, *args):  # noqa: A003 - inherited name
+                del format, args
+
+        custom_server = HTTPServer(("127.0.0.1", 0), CustomRpcHandler)
+        custom_thread = threading.Thread(target=custom_server.serve_forever, daemon=True)
+        custom_thread.start()
+        base_url = f"http://127.0.0.1:{custom_server.server_address[1]}"
+        try:
+            client = A2AClient(base_url)
+            card = client.get_agent_card()
+            sent = client.send_message("hello")
+            streamed = list(client.stream_message("hello"))
+            fetched = client.get_task("remote-task")
+            canceled = client.cancel_task("remote-task")
+        finally:
+            custom_server.shutdown()
+            custom_server.server_close()
+            custom_thread.join(timeout=2)
+
+        self.assertEqual(card["supportedInterfaces"][0]["url"], f"{base_url}/a2a")
+        self.assertEqual(sent["id"], "remote-task")
+        self.assertEqual(streamed[0]["task"]["id"], "remote-task")
+        self.assertEqual(fetched["id"], "remote-task")
+        self.assertEqual(canceled["id"], "remote-task")
+        self.assertEqual(requests, ["/a2a", "/a2a", "/a2a", "/a2a"])
