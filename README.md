@@ -65,21 +65,23 @@ Then restart Hermes and verify the plugin is visible:
 hermes plugins list
 ```
 
-If your Hermes version supports top-level CLI commands from standalone plugins,
-you can use:
+Use the plugin-owned console script for CLI operations:
+
+```bash
+uv run hermes-a2a status
+uv run hermes-a2a card
+```
+
+Some Hermes versions may also expose standalone plugin CLI commands at the
+top level after the plugin is enabled:
 
 ```bash
 hermes a2a status
 hermes a2a card
 ```
 
-For Hermes versions that do not yet discover standalone plugin CLI commands, use
-the plugin-owned console script instead:
-
-```bash
-uv run hermes-a2a status
-uv run hermes-a2a card
-```
+Treat `hermes-a2a` as the reliable command until Hermes core exposes
+standalone plugin CLI discovery in your installation.
 
 ## Runtime surfaces
 
@@ -102,12 +104,15 @@ uv run hermes-a2a card
   - `a2a_cancel_task`
   - `a2a_delegate`
 - CLI:
-  - `hermes a2a status`
-  - `hermes a2a card`
-  - `hermes a2a serve`
-  - `hermes a2a agents list`
-  - `hermes a2a task get <id>`
-  - `hermes a2a task cancel <id>`
+  - `hermes-a2a status`
+  - `hermes-a2a card`
+  - `hermes-a2a serve`
+  - `hermes-a2a agents list`
+  - `hermes-a2a task get <id>`
+  - `hermes-a2a task cancel <id>`
+
+  Hermes versions with standalone plugin CLI discovery may additionally support
+  the same commands under `hermes a2a ...`.
 
 ## Config
 
