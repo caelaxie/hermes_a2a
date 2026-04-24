@@ -33,6 +33,7 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(payload["plugin"], "a2a")
         self.assertEqual(payload["status"], "ok")
         self.assertFalse(payload["config"]["bearer_token_present"])
+        self.assertEqual(payload["config"]["default_timeout_seconds"], 120.0)
         self.assertEqual(payload["config"]["remote_agents"], [])
 
     def test_status_payload_reflects_environment(self) -> None:
