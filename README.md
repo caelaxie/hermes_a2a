@@ -197,8 +197,9 @@ Example push notification config request:
 - The default runtime timeout is 120 seconds. Override it with
   `A2A_DEFAULT_TIMEOUT_SECONDS` when a deployment needs shorter or longer model
   execution and remote-agent request windows.
-- The Hermes subprocess adapter is synchronous: streaming endpoints emit A2A
-  JSON-RPC SSE `data:` frames after the underlying Hermes CLI call returns.
+- The Hermes subprocess adapter starts streaming immediately with a task status
+  update, then emits the final Hermes CLI output after `hermes chat` returns.
+  It does not yet stream individual model tokens from the Hermes CLI.
 - The SQLite store is durable by default and keeps official A2A task snapshots,
   StreamResponse event payloads, remote delegation tracking, and named inbound
   push notification config state.
