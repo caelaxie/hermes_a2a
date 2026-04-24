@@ -49,6 +49,7 @@ from .protocol import (
     METHOD_SEND_STREAMING_MESSAGE,
     METHOD_SUBSCRIBE_TO_TASK,
     PROTOCOL_VERSION,
+    TASK_STATE_CANCELED,
     TERMINAL_TASK_STATES,
     decode_page_token,
     decode_task_page_token,
@@ -197,11 +198,15 @@ class A2AService:
         if hermes_session_id:
             self.store.set_hermes_session(task_id, task["contextId"], hermes_session_id)
         stream_response = apply_hermes_event(task, adapter_event)
+        self.store.upsert_task(task, direction="inbound")
         self.store.append_event(task_id, stream_response)
         self._notify_push(task_id, stream_response)
         return stream_response
 
-    def _finalize_message_task(self, task: dict, task_id: str, context_id: str) -> None:
+    def _finalize_message_task(self, task: dict, task_id: str, context_id: str) -> dict:
+        latest = self.store.get_task(task_id)
+        if latest and latest.get("status", {}).get("state") == TASK_STATE_CANCELED:
+            task = latest
         adapter_metadata = self.adapter.finalize_task(task_id, context_id)
         task.setdefault("metadata", {}).update(
             {
@@ -210,6 +215,7 @@ class A2AService:
             }
         )
         self.store.upsert_task(task, direction="inbound")
+        return task
 
     def send_message(
         self,
@@ -231,13 +237,15 @@ class A2AService:
             stream_response = self._record_adapter_event(task, task_id, adapter_event)
             events.append(stream_response)
 
-        self._finalize_message_task(task, task_id, context_id)
+        task = self._finalize_message_task(task, task_id, context_id)
         return task, events
 
     def stream_message(self, params: dict) -> Iterable[dict]:
         task, task_id, context_id, message_text = self._prepare_message_task(params)
+        self.store.upsert_task(task, direction="inbound")
 
         def stream_responses() -> Iterable[dict]:
+            nonlocal task
             finalized = False
             try:
                 for adapter_event in self._iter_adapter_events(
@@ -249,7 +257,7 @@ class A2AService:
                 ):
                     yield self._record_adapter_event(task, task_id, adapter_event)
 
-                self._finalize_message_task(task, task_id, context_id)
+                task = self._finalize_message_task(task, task_id, context_id)
                 finalized = True
                 yield {"task": task}
             finally:
