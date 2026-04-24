@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Iterator
 from uuid import uuid4
@@ -16,6 +17,7 @@ from .protocol import (
     METHOD_SEND_MESSAGE,
     METHOD_SEND_STREAMING_MESSAGE,
     PROTOCOL_VERSION,
+    RPC_PATH,
 )
 
 
@@ -59,14 +61,40 @@ class A2AClient:
         self.base_url = base_url.rstrip("/")
         self.headers = headers or {}
         self.timeout = timeout
+        self._jsonrpc_url: str | None = None
+
+    def _resolve_url(self, path_or_url: str) -> str:
+        if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
+            return path_or_url
+        return urllib.parse.urljoin(f"{self.base_url}/", path_or_url.lstrip("/"))
+
+    def _fallback_jsonrpc_url(self) -> str:
+        return self._resolve_url(RPC_PATH)
+
+    def _select_jsonrpc_url(self, card: dict) -> str:
+        for interface in card.get("supportedInterfaces") or []:
+            if not isinstance(interface, dict):
+                continue
+            if (
+                interface.get("protocolBinding") == "JSONRPC"
+                and interface.get("protocolVersion") == PROTOCOL_VERSION
+                and interface.get("url")
+            ):
+                return self._resolve_url(str(interface["url"]))
+        return self._fallback_jsonrpc_url()
+
+    def _jsonrpc_endpoint(self) -> str:
+        if self._jsonrpc_url is None:
+            self.get_agent_card()
+        return self._jsonrpc_url or self._fallback_jsonrpc_url()
 
     def _request(
         self,
-        path: str,
+        path_or_url: str,
         body: dict | None = None,
         accept: str = "application/json",
     ):
-        url = f"{self.base_url}{path}"
+        url = self._resolve_url(path_or_url)
         payload = None
         headers = {"Accept": accept, "A2A-Version": PROTOCOL_VERSION, **self.headers}
         if body is not None:
@@ -85,7 +113,9 @@ class A2AClient:
 
     def get_agent_card(self) -> dict:
         with self._request("/.well-known/agent-card.json") as response:
-            return json.loads(response.read().decode("utf-8"))
+            card = json.loads(response.read().decode("utf-8"))
+        self._jsonrpc_url = self._select_jsonrpc_url(card)
+        return card
 
     def send_message(
         self,
@@ -107,7 +137,7 @@ class A2AClient:
                 },
             },
         }
-        with self._request("/rpc", request) as response:
+        with self._request(self._jsonrpc_endpoint(), request) as response:
             payload = json.loads(response.read().decode("utf-8"))
         if "error" in payload:
             raise A2AClientError(payload["error"]["message"])
@@ -136,7 +166,11 @@ class A2AClient:
                 },
             },
         }
-        with self._request("/rpc", request, accept="text/event-stream") as response:
+        with self._request(
+            self._jsonrpc_endpoint(),
+            request,
+            accept="text/event-stream",
+        ) as response:
             for raw_line in response:
                 line = raw_line.decode("utf-8").strip()
                 if not line:
@@ -154,7 +188,7 @@ class A2AClient:
             "method": METHOD_GET_TASK,
             "params": {"id": task_id},
         }
-        with self._request("/rpc", request) as response:
+        with self._request(self._jsonrpc_endpoint(), request) as response:
             payload = json.loads(response.read().decode("utf-8"))
         if "error" in payload:
             raise A2AClientError(payload["error"]["message"])
@@ -167,7 +201,7 @@ class A2AClient:
             "method": METHOD_CANCEL_TASK,
             "params": {"id": task_id},
         }
-        with self._request("/rpc", request) as response:
+        with self._request(self._jsonrpc_endpoint(), request) as response:
             payload = json.loads(response.read().decode("utf-8"))
         if "error" in payload:
             raise A2AClientError(payload["error"]["message"])

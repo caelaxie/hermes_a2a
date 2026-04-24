@@ -21,6 +21,7 @@ sys_path = str(ROOT / "src")
 if sys_path not in os.sys.path:
     os.sys.path.insert(0, sys_path)
 
+from hermes_a2a.client import A2AClient
 from hermes_a2a.config import A2APluginConfig
 from hermes_a2a.protocol import (
     ERROR_INVALID_PARAMS,
@@ -557,3 +558,103 @@ class ServerTests(unittest.TestCase):
 
         self.assertEqual(delegated["task"]["status"]["state"], "TASK_STATE_COMPLETED")
         self.assertEqual(refreshed["id"], delegated["task"]["id"])
+
+    def test_outbound_client_uses_jsonrpc_url_from_agent_card(self) -> None:
+        requests = []
+
+        class CustomRpcHandler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+                if self.path != "/.well-known/agent-card.json":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
+                payload = {
+                    "name": "Custom RPC Agent",
+                    "description": "Test agent with a non-default JSON-RPC path.",
+                    "supportedInterfaces": [
+                        {
+                            "url": f"{base_url}/a2a",
+                            "protocolBinding": "JSONRPC",
+                            "protocolVersion": "1.0",
+                        }
+                    ],
+                    "version": "test",
+                    "defaultInputModes": ["text/plain"],
+                    "defaultOutputModes": ["text/plain"],
+                    "capabilities": {"streaming": True},
+                    "skills": [],
+                }
+                body = json.dumps(payload).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
+                requests.append(self.path)
+                if self.path != "/a2a":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                payload = json.loads(body.decode("utf-8"))
+                task = {
+                    "id": "remote-task",
+                    "contextId": "remote-task",
+                    "status": {"state": "TASK_STATE_COMPLETED"},
+                    "history": [],
+                }
+                if payload["method"] == "SendStreamingMessage":
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": payload["id"],
+                        "result": {"task": task},
+                    }
+                    response_body = f"data: {json.dumps(response)}\n\n".encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Content-Length", str(len(response_body)))
+                    self.end_headers()
+                    self.wfile.write(response_body)
+                    return
+                if payload["method"] == "SendMessage":
+                    result = {"task": task}
+                elif payload["method"] in {"GetTask", "CancelTask"}:
+                    result = task
+                else:
+                    result = None
+                response = {"jsonrpc": "2.0", "id": payload["id"], "result": result}
+                response_body = json.dumps(response).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+
+            def log_message(self, format, *args):  # noqa: A003 - inherited name
+                del format, args
+
+        custom_server = HTTPServer(("127.0.0.1", 0), CustomRpcHandler)
+        custom_thread = threading.Thread(target=custom_server.serve_forever, daemon=True)
+        custom_thread.start()
+        base_url = f"http://127.0.0.1:{custom_server.server_address[1]}"
+        try:
+            client = A2AClient(base_url)
+            card = client.get_agent_card()
+            sent = client.send_message("hello")
+            streamed = list(client.stream_message("hello"))
+            fetched = client.get_task("remote-task")
+            canceled = client.cancel_task("remote-task")
+        finally:
+            custom_server.shutdown()
+            custom_server.server_close()
+            custom_thread.join(timeout=2)
+
+        self.assertEqual(card["supportedInterfaces"][0]["url"], f"{base_url}/a2a")
+        self.assertEqual(sent["id"], "remote-task")
+        self.assertEqual(streamed[0]["task"]["id"], "remote-task")
+        self.assertEqual(fetched["id"], "remote-task")
+        self.assertEqual(canceled["id"], "remote-task")
+        self.assertEqual(requests, ["/a2a", "/a2a", "/a2a", "/a2a"])
