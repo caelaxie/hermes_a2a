@@ -185,7 +185,7 @@ set `A2A_PUBLIC_BASE_URL` to the external HTTPS origin. Forward both
 `/.well-known/agent-card.json` and `/rpc` to the same local service. The
 AgentCard endpoint intentionally remains publicly discoverable so clients can
 read the bridge URL, protocol version, and advertised security scheme. When
-`A2A_BEARER_TOKEN` is set, `/rpc` requires `Authorization: Bearer ...`.
+`A2A_BEARER_TOKEN` is set, `/rpc` requires `Authorization: Bearer $TOKEN`.
 Preserve the `Authorization` and `A2A-Version` headers, allow request durations
 at least as long as `A2A_DEFAULT_TIMEOUT_SECONDS`, and disable response
 buffering for SSE calls to `SendStreamingMessage` and `SubscribeToTask`.
